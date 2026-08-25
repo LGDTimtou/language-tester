@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quiz: {{ lesson['title'] }} — Swedish Vocab Trainer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+    <a class="back-link" href="/lesson/{{ lesson['id'] }}">&larr; {{ lesson['title'] }}</a>
+    <header class="top">
+        <div>
+            <h1>Quiz: {{ lesson['number'] }}. {{ lesson['title'] }}</h1>
+        </div>
+    </header>
+
+    <div class="direction-toggle">
+        Direction: <span id="direction-label"></span>
+        <button id="direction-btn">Swap direction</button>
+    </div>
+
+    <div id="quiz-area"></div>
+</div>
+
+<script>
+const lessonId = {{ lesson['id'] }};
+let current = null;      // current word object
+let progress = {pending: 0, done: 0, total: 0, score: null};
+let answered = false;
+let sessionAnswered = 0;
+let sessionCorrect = 0;
+let direction = localStorage.getItem('quizDirection') || 'sv'; // 'sv' = type Swedish, 'en' = type English
+
+function updateDirectionLabel() {
+    document.getElementById('direction-label').textContent =
+        direction === 'sv' ? 'See English → type Swedish' : 'See Swedish → type English';
+}
+updateDirectionLabel();
+
+document.getElementById('direction-btn').addEventListener('click', () => {
+    direction = direction === 'sv' ? 'en' : 'sv';
+    localStorage.setItem('quizDirection', direction);
+    updateDirectionLabel();
+    loadNext();
+});
+
+function promptText(word) {
+    return direction === 'sv' ? (word.english || '(no translation)') : word.swedish;
+}
+
+function scoreClass(score) {
+    if (score === null || score === undefined) return 'none';
+    if (score >= 80) return 'excellent';
+    if (score >= 50) return 'fair';
+    return 'poor';
+}
+
+function progressBarHtml() {
+    const pct = progress.total ? Math.round(100 * progress.done / progress.total) : 0;
+    return `
+        <div class="quiz-progress-wrap">
+            <div class="quiz-progress-label">${progress.done} / ${progress.total} mastered this round</div>
+            <div class="progress-bar"><div style="width: ${pct}%"></div></div>
+        </div>
+    `;
+}
+
+function renderQuizArea() {
+    const area = document.getElementById('quiz-area');
+    if (!current) {
+        if (progress.done > 0 && progress.score !== null && progress.score !== undefined) {
+            area.innerHTML = `<div class="quiz-card">
+                <div class="finished-note">🎉 Round complete!</div>
+                <div class="round-score ${scoreClass(progress.score)}">${progress.score}%</div>
+                <div class="round-score-label">correct on the first try (${progress.done} word${progress.done === 1 ? '' : 's'})</div>
+                <div class="quiz-buttons">
+                    <button id="restart-btn">Start another round</button>
+                    <a class="btn secondary" href="/lesson/${lessonId}">Back to word list</a>
+                </div>
+            </div>`;
+        } else {
+            area.innerHTML = `<div class="quiz-card">
+                <div class="finished-note">You already know every word in this lesson!</div>
+                <div class="quiz-buttons">
+                    <button id="restart-btn">Start another round</button>
+                    <a class="btn secondary" href="/lesson/${lessonId}">Back to word list</a>
+                </div>
+            </div>`;
+        }
+        document.getElementById('restart-btn').addEventListener('click', loadNext);
+        return;
+    }
+    const tenseBadge = current.tense ? `<span class="tense-badge">${current.tense}</span>` : '';
+    const hint = (direction === 'sv' && current.group_hint) ? current.group_hint : '';
+    area.innerHTML = `
+        <div class="quiz-card">
+            ${progressBarHtml()}
+            <div class="quiz-prompt">${promptText(current)}</div>
+            <div class="quiz-context">${tenseBadge}</div>
+            ${hint ? `<div class="group-hint">${hint}</div>` : ''}
+            <input type="text" id="answer-input" class="quiz-input" autocomplete="off" placeholder="Type your answer">
+            <div class="quiz-feedback" id="feedback"></div>
+            <div class="quiz-buttons">
+                <button id="submit-btn">Check</button>
+                <button class="secondary" id="know-btn">I know this well — stop asking</button>
+            </div>
+            <div class="quiz-stats">
+                <div>Answered: <b id="stat-answered">${sessionAnswered}</b></div>
+                <div>Correct: <b id="stat-correct">${sessionCorrect}</b></div>
+            </div>
+        </div>
+    `;
+    document.getElementById('submit-btn').addEventListener('click', onSubmitOrNext);
+    document.getElementById('know-btn').addEventListener('click', onKnowWell);
+    const input = document.getElementById('answer-input');
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); onSubmitOrNext(); }
+    });
+    input.focus();
+}
+
+let advancing = false;
+
+async function onSubmitOrNext() {
+    if (advancing) return;
+    if (!answered) {
+        const input = document.getElementById('answer-input');
+        const given = input.value;
+        answered = true;
+        input.readOnly = true;
+
+        const res = await fetch(`/api/lessons/${lessonId}/quiz-check`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({word_id: current.id, answer: given, direction})
+        });
+        const result = await res.json();
+        const correct = result.correct;
+
+        sessionAnswered++;
+        if (correct) sessionCorrect++;
+
+        input.classList.add(correct ? 'correct' : 'incorrect');
+        input.focus();
+        const fb = document.getElementById('feedback');
+        fb.className = 'quiz-feedback ' + (correct ? 'correct' : 'incorrect');
+        fb.textContent = correct ? 'Correct!' : `Incorrect — answer: ${result.correct_answer}`;
+        document.getElementById('submit-btn').textContent = 'Next';
+        document.getElementById('stat-answered').textContent = sessionAnswered;
+        document.getElementById('stat-correct').textContent = sessionCorrect;
+
+        if (correct) {
+            advancing = true;
+            setTimeout(loadNext, 400);
+        }
+    } else {
+        loadNext();
+    }
+}
+
+async function onKnowWell() {
+    await fetch(`/api/words/${current.id}/known`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({known: true})
+    });
+    loadNext();
+}
+
+async function loadNext() {
+    answered = false;
+    advancing = false;
+    const res = await fetch(`/api/lessons/${lessonId}/quiz-next`);
+    const data = await res.json();
+    current = data.word;
+    progress = {pending: data.pending, done: data.done, total: data.total, score: data.score};
+    renderQuizArea();
+}
+
+loadNext();
+</script>
+</body>
+</html>

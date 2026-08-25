@@ -1,0 +1,11 @@
+# contains vocabulary/translations extracted from copyrighted Patreon content
+vocab.db
+*.sqlite3
+
+# python
+venv/
+__pycache__/
+*.pyc
+
+# os cruft
+.DS_Store

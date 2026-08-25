@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Swedish Vocab Trainer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+    <header class="top">
+        <div>
+            <h1>Swedish Vocab Trainer</h1>
+            <div class="subtitle">{{ lessons|length }} lessons from Learn Swedish with Katrin</div>
+        </div>
+    </header>
+
+    <div class="lesson-grid">
+        {% for l in lessons %}
+        {% set known = l['known_count'] or 0 %}
+        {% set total = l['word_count'] or 0 %}
+        {% if total > 0 %}
+        <a class="lesson-card clickable" href="/lesson/{{ l['id'] }}">
+        {% else %}
+        <div class="lesson-card disabled">
+        {% endif %}
+            <div class="lesson-card-top">
+                <div class="lesson-number">LESSON {{ l['number'] }}</div>
+                {% if l['best_score'] is not none %}
+                <span class="score-badge {{ score_class(l['best_score']) }}">{{ l['best_score'] }}%</span>
+                {% endif %}
+            </div>
+            <div class="lesson-title">{{ l['title'] }}</div>
+            {% if total > 0 %}
+            <div class="lesson-meta">{{ known }} / {{ total }} known</div>
+            <div class="progress-bar"><div style="width: {{ (100 * known / total) | round(0, 'floor') }}%"></div></div>
+            {% else %}
+            <div class="lesson-meta">No vocabulary list for this lesson</div>
+            {% endif %}
+        {% if total > 0 %}
+        </a>
+        {% else %}
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+</div>
+</body>
+</html>
