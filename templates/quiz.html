@@ -102,18 +102,15 @@ function renderQuizArea() {
         return;
     }
     const tenseBadge = current.tense ? `<span class="tense-badge">${current.tense}</span>` : '';
-    const hint = (direction === 'sv' && current.group_hint) ? current.group_hint : '';
     area.innerHTML = `
         <div class="quiz-card">
             ${progressBarHtml()}
             <div class="quiz-prompt">${promptText(current)}</div>
             <div class="quiz-context">${tenseBadge}</div>
-            ${hint ? `<div class="group-hint">${hint}</div>` : ''}
             <input type="text" id="answer-input" class="quiz-input" autocomplete="off" placeholder="Type your answer">
             <div class="quiz-feedback" id="feedback"></div>
             <div class="quiz-buttons">
                 <button id="submit-btn">Check</button>
-                <button class="secondary" id="know-btn">I know this well — stop asking</button>
             </div>
             <div class="quiz-stats">
                 <div>Answered: <b id="stat-answered">${sessionAnswered}</b></div>
@@ -122,7 +119,6 @@ function renderQuizArea() {
         </div>
     `;
     document.getElementById('submit-btn').addEventListener('click', onSubmitOrNext);
-    document.getElementById('know-btn').addEventListener('click', onKnowWell);
     const input = document.getElementById('answer-input');
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); onSubmitOrNext(); }
@@ -163,19 +159,37 @@ async function onSubmitOrNext() {
         if (correct) {
             advancing = true;
             setTimeout(loadNext, 400);
+        } else {
+            const typoBtn = document.createElement('button');
+            typoBtn.className = 'secondary';
+            typoBtn.id = 'typo-btn';
+            typoBtn.textContent = 'It was a typo';
+            typoBtn.title = "Counts it as correct instead - use this when you knew the word but mistyped it";
+            typoBtn.addEventListener('click', onMarkTypo);
+            document.querySelector('.quiz-buttons').appendChild(typoBtn);
         }
     } else {
         loadNext();
     }
 }
 
-async function onKnowWell() {
-    await fetch(`/api/words/${current.id}/known`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({known: true})
-    });
-    loadNext();
+async function onMarkTypo() {
+    if (advancing) return;
+    advancing = true;
+    document.getElementById('typo-btn').disabled = true;
+
+    await fetch(`/api/words/${current.id}/mark-typo`, {method: 'POST'});
+
+    sessionCorrect++;
+    document.getElementById('stat-correct').textContent = sessionCorrect;
+    const input = document.getElementById('answer-input');
+    input.classList.remove('incorrect');
+    input.classList.add('correct');
+    const fb = document.getElementById('feedback');
+    fb.className = 'quiz-feedback correct';
+    fb.textContent = 'Marked as a typo — counted as correct.';
+
+    setTimeout(loadNext, 400);
 }
 
 async function loadNext() {

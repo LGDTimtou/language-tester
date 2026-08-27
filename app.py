@@ -158,18 +158,6 @@ def api_set_known(word_id):
     return jsonify({"ok": True})
 
 
-def _synonym_siblings(db, lesson_id, word_row):
-    """Other words in the same lesson sharing this word's meaning group
-    (only plain words are grouped this way; verb tense forms never are)."""
-    if word_row["tense"] is not None or not word_row["verb_group"]:
-        return []
-    rows = db.execute(
-        "SELECT * FROM words WHERE lesson_id = ? AND verb_group = ? AND tense IS NULL AND id != ?",
-        (lesson_id, word_row["verb_group"], word_row["id"]),
-    ).fetchall()
-    return rows
-
-
 @app.route("/api/lessons/<int:lesson_id>/quiz-check", methods=["POST"])
 def api_quiz_check(lesson_id):
     db = get_db()
@@ -184,32 +172,36 @@ def api_quiz_check(lesson_id):
     if not current:
         abort(404)
 
-    norm_given = normalize_answer(given)
-    siblings = _synonym_siblings(db, lesson_id, current) if direction == "sv" else []
-
-    credited_id = None
-    if direction == "sv":
-        # accept the current word's own answer, or any not-yet-used sibling answer
-        candidates = [current] + [s for s in siblings if s["session_state"] == "pending"]
-        for cand in candidates:
-            if normalize_answer(cand["swedish"]) == norm_given:
-                credited_id = cand["id"]
-                break
-    else:
-        if normalize_answer(current["english"]) == norm_given:
-            credited_id = current["id"]
-
-    correct = credited_id is not None
+    expected = current["swedish"] if direction == "sv" else current["english"]
+    correct = normalize_answer(given) == normalize_answer(expected)
 
     if correct:
-        db.execute("UPDATE words SET correct_count = correct_count + 1 WHERE id = ?", (credited_id,))
-        db.execute("UPDATE words SET session_state = 'done' WHERE id = ? AND session_state = 'pending'", (credited_id,))
+        db.execute("UPDATE words SET correct_count = correct_count + 1 WHERE id = ?", (word_id,))
+        db.execute("UPDATE words SET session_state = 'done' WHERE id = ? AND session_state = 'pending'", (word_id,))
     else:
         db.execute("UPDATE words SET wrong_count = wrong_count + 1, round_missed = 1 WHERE id = ?", (word_id,))
     db.commit()
 
-    correct_answer = current["swedish"] if direction == "sv" else current["english"]
-    return jsonify({"correct": correct, "correct_answer": correct_answer})
+    return jsonify({"correct": correct, "correct_answer": expected})
+
+
+@app.route("/api/words/<int:word_id>/mark-typo", methods=["POST"])
+def api_mark_typo(word_id):
+    """The most recent wrong answer for this word was a typo, not a real
+    mistake: undo the wrong count and credit it as correct instead, so the
+    word finishes the round without needing to be re-answered."""
+    db = get_db()
+    cur = db.execute(
+        "UPDATE words SET wrong_count = MAX(wrong_count - 1, 0), correct_count = correct_count + 1, "
+        "round_missed = 0 WHERE id = ?",
+        (word_id,),
+    )
+    if cur.rowcount == 0:
+        abort(404)
+    db.execute("UPDATE words SET session_state = 'done' WHERE id = ? AND session_state = 'pending'", (word_id,))
+    db.commit()
+    row = db.execute("SELECT * FROM words WHERE id = ?", (word_id,)).fetchone()
+    return jsonify(word_stats_row(row))
 
 
 def _session_counts(db, lesson_id):
@@ -317,17 +309,6 @@ def api_quiz_next(lesson_id):
     """, (lesson_id,)).fetchone()
 
     word = word_stats_row(row)
-    siblings = _synonym_siblings(db, lesson_id, row)
-    if siblings:
-        already_used = any(s["session_state"] == "done" for s in siblings)
-        word["group_hint"] = (
-            "This word has more than one correct answer — give a different one than last time."
-            if already_used else
-            "This word has more than one correct answer — either is fine."
-        )
-    else:
-        word["group_hint"] = None
-
     return jsonify({"word": word, "pending": pending, "done": done, "total": pending + done})
 
 

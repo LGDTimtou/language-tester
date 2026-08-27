@@ -293,17 +293,6 @@ input[type="checkbox"] { width: 17px; height: 17px; cursor: pointer; }
     margin-bottom: 18px;
 }
 
-.group-hint {
-    display: inline-block;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--brand-dark);
-    background: #e8effe;
-    border-radius: 999px;
-    padding: 3px 12px;
-    margin: 8px 0 -4px;
-}
-
 .quiz-prompt {
     font-size: 1.9rem;
     font-weight: 700;

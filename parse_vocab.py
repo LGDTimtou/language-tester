@@ -282,22 +282,6 @@ def parse_lesson_folder(folder_name):
     infinitives = {vf["swedish"] for vf in verb_forms if vf["tense"] == "Infinitiv"}
     words = [w for w in words if w["swedish"] not in infinitives]
 
-    # words that share the exact same English meaning are alternate valid
-    # answers for the same prompt (e.g. "Jag pratar" / "Jag snackar" both
-    # mean "I speak") - tag them with a shared group so the quiz can accept
-    # either one, while still requiring both to be answered in a round
-    by_meaning = {}
-    for w in words:
-        key = w["english"].strip().lower() if w["english"] else None
-        if key:
-            by_meaning.setdefault(key, []).append(w)
-    group_counter = 0
-    for members in by_meaning.values():
-        if len(members) > 1:
-            group_counter += 1
-            group_key = f"syn{group_counter}"
-            for w in members:
-                w["group"] = group_key
     for w in words:
         w.setdefault("group", None)
 
