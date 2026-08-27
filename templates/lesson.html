@@ -60,7 +60,7 @@ function correctPctClass(w) {
     const correctPct = 100 - w.wrong_pct;
     if (correctPct === 100) return 'perfect';
     if (correctPct <= 60) return 'low';
-    return '';
+    return 'fair';
 }
 
 function correctPctText(w) {

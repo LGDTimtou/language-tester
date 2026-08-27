@@ -74,7 +74,21 @@ def index():
         GROUP BY l.id
         ORDER BY l.number
     """).fetchall()
-    return render_template("index.html", lessons=rows, score_class=score_class)
+
+    lessons = []
+    for r in rows:
+        total = r["word_count"] or 0
+        known = r["known_count"] or 0
+        testable = total - known  # words actually in play for training (known ones are skipped)
+        score = r["best_score"]
+        correct_est = round(testable * score / 100) if (score is not None and testable > 0) else 0
+        lessons.append({
+            "id": r["id"], "number": r["number"], "title": r["title"],
+            "best_score": score, "word_count": total, "testable": testable,
+            "correct_est": correct_est,
+        })
+
+    return render_template("index.html", lessons=lessons, score_class=score_class)
 
 
 @app.route("/lesson/<int:lesson_id>")

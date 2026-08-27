@@ -126,6 +126,9 @@ h2 { font-size: 1.15rem; margin: 0; }
     height: 100%;
     background: var(--good);
 }
+.progress-bar.score-bar.fair > div { background: var(--warn); }
+.progress-bar.score-bar.poor > div { background: var(--bad); }
+.progress-bar.score-bar.none > div { background: var(--muted); }
 
 table.words {
     width: 100%;
@@ -178,6 +181,7 @@ table.words tr.editing-row { background: #fffceb; }
 
 .correct-pct { font-variant-numeric: tabular-nums; }
 .correct-pct.low { color: var(--bad); font-weight: 600; }
+.correct-pct.fair { color: var(--warn); }
 .correct-pct.perfect { color: var(--good); }
 .correct-pct.none { color: var(--muted); }
 

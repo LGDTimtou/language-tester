@@ -17,7 +17,6 @@
 
     <div class="lesson-grid">
         {% for l in lessons %}
-        {% set known = l['known_count'] or 0 %}
         {% set total = l['word_count'] or 0 %}
         {% if total > 0 %}
         <a class="lesson-card clickable" href="/lesson/{{ l['id'] }}">
@@ -32,8 +31,12 @@
             </div>
             <div class="lesson-title">{{ l['title'] }}</div>
             {% if total > 0 %}
-            <div class="lesson-meta">{{ known }} / {{ total }} known</div>
-            <div class="progress-bar"><div style="width: {{ (100 * known / total) | round(0, 'floor') }}%"></div></div>
+                {% if l['testable'] > 0 %}
+                <div class="lesson-meta">{{ l['correct_est'] }} / {{ l['testable'] }}</div>
+                <div class="progress-bar score-bar {{ score_class(l['best_score']) }}"><div style="width: {{ l['best_score'] or 0 }}%"></div></div>
+                {% else %}
+                <div class="lesson-meta">All words known</div>
+                {% endif %}
             {% else %}
             <div class="lesson-meta">No vocabulary list for this lesson</div>
             {% endif %}
