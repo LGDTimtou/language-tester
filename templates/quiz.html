@@ -35,6 +35,7 @@ if (quizMode === 'mistakes') {
 let current = null;      // current word object
 let progress = {pending: 0, done: 0, total: 0, score: null};
 let answered = false;
+let retrying = false;  // true while re-typing after "It was a typo"
 let sessionAnswered = 0;
 let sessionCorrect = 0;
 let direction = localStorage.getItem('quizDirection') || 'sv'; // 'sv' = type Swedish, 'en' = type English
@@ -136,7 +137,10 @@ async function onSubmitOrNext() {
         answered = true;
         input.readOnly = true;
 
-        const res = await fetch(`/api/lessons/${lessonId}/quiz-check`, {
+        const endpoint = retrying
+            ? `/api/lessons/${lessonId}/quiz-typo-retry`
+            : `/api/lessons/${lessonId}/quiz-check`;
+        const res = await fetch(endpoint, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({word_id: current.id, answer: given, direction})
@@ -144,28 +148,38 @@ async function onSubmitOrNext() {
         const result = await res.json();
         const correct = result.correct;
 
-        sessionAnswered++;
+        if (!retrying) sessionAnswered++;
         if (correct) sessionCorrect++;
 
         input.classList.add(correct ? 'correct' : 'incorrect');
         input.focus();
         const fb = document.getElementById('feedback');
         fb.className = 'quiz-feedback ' + (correct ? 'correct' : 'incorrect');
-        fb.textContent = correct ? 'Correct!' : `Incorrect — answer: ${result.correct_answer}`;
+        if (correct) {
+            fb.textContent = retrying ? 'Correct! Counted as correct on the first try.' : 'Correct!';
+        } else {
+            fb.textContent = retrying
+                ? `Still incorrect — answer: ${result.correct_answer}`
+                : `Incorrect — answer: ${result.correct_answer}`;
+        }
         document.getElementById('submit-btn').textContent = 'Next';
         document.getElementById('stat-answered').textContent = sessionAnswered;
         document.getElementById('stat-correct').textContent = sessionCorrect;
 
+        const existingTypoBtn = document.getElementById('typo-btn');
+        if (existingTypoBtn) existingTypoBtn.remove();
+
         if (correct) {
             advancing = true;
             setTimeout(loadNext, 400);
-        } else {
+        } else if (!retrying) {
+            // first wrong attempt only - offer one retry
             const typoBtn = document.createElement('button');
             typoBtn.className = 'secondary';
             typoBtn.id = 'typo-btn';
             typoBtn.textContent = 'It was a typo';
-            typoBtn.title = "Counts it as correct instead - use this when you knew the word but mistyped it";
-            typoBtn.addEventListener('click', onMarkTypo);
+            typoBtn.title = "Type it again - if you get it right this counts as correct, otherwise it counts as wrong";
+            typoBtn.addEventListener('click', onRetryTypo);
             document.querySelector('.quiz-buttons').appendChild(typoBtn);
         }
     } else {
@@ -173,27 +187,27 @@ async function onSubmitOrNext() {
     }
 }
 
-async function onMarkTypo() {
-    if (advancing) return;
-    advancing = true;
-    document.getElementById('typo-btn').disabled = true;
+function onRetryTypo() {
+    retrying = true;
+    answered = false;
 
-    await fetch(`/api/words/${current.id}/mark-typo`, {method: 'POST'});
-
-    sessionCorrect++;
-    document.getElementById('stat-correct').textContent = sessionCorrect;
     const input = document.getElementById('answer-input');
-    input.classList.remove('incorrect');
-    input.classList.add('correct');
-    const fb = document.getElementById('feedback');
-    fb.className = 'quiz-feedback correct';
-    fb.textContent = 'Marked as a typo — counted as correct.';
+    input.value = '';
+    input.readOnly = false;
+    input.classList.remove('correct', 'incorrect');
+    input.focus();
 
-    setTimeout(loadNext, 400);
+    const fb = document.getElementById('feedback');
+    fb.textContent = '';
+    fb.className = 'quiz-feedback';
+
+    document.getElementById('submit-btn').textContent = 'Check';
+    document.getElementById('typo-btn').remove();
 }
 
 async function loadNext() {
     answered = false;
+    retrying = false;
     advancing = false;
     const res = await fetch(`/api/lessons/${lessonId}/quiz-next?mode=${quizMode}`);
     const data = await res.json();

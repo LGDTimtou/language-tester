@@ -185,23 +185,39 @@ def api_quiz_check(lesson_id):
     return jsonify({"correct": correct, "correct_answer": expected})
 
 
-@app.route("/api/words/<int:word_id>/mark-typo", methods=["POST"])
-def api_mark_typo(word_id):
-    """The most recent wrong answer for this word was a typo, not a real
-    mistake: undo the wrong count and credit it as correct instead, so the
-    word finishes the round without needing to be re-answered."""
+@app.route("/api/lessons/<int:lesson_id>/quiz-typo-retry", methods=["POST"])
+def api_quiz_typo_retry(lesson_id):
+    """Retry after claiming the previous wrong answer was a typo. Get it
+    right this time and the original miss is wiped - it counts as correct
+    on the first try. Get it wrong again and the original miss just stands
+    (not counted a second time)."""
     db = get_db()
-    cur = db.execute(
-        "UPDATE words SET wrong_count = MAX(wrong_count - 1, 0), correct_count = correct_count + 1, "
-        "round_missed = 0 WHERE id = ?",
-        (word_id,),
-    )
-    if cur.rowcount == 0:
+    body = request.get_json(force=True)
+    word_id = body.get("word_id")
+    given = body.get("answer", "")
+    direction = body.get("direction", "sv")
+
+    current = db.execute(
+        "SELECT * FROM words WHERE id = ? AND lesson_id = ?", (word_id, lesson_id)
+    ).fetchone()
+    if not current:
         abort(404)
-    db.execute("UPDATE words SET session_state = 'done' WHERE id = ? AND session_state = 'pending'", (word_id,))
-    db.commit()
-    row = db.execute("SELECT * FROM words WHERE id = ?", (word_id,)).fetchone()
-    return jsonify(word_stats_row(row))
+
+    expected = current["swedish"] if direction == "sv" else current["english"]
+    correct = normalize_answer(given) == normalize_answer(expected)
+
+    if correct:
+        db.execute(
+            "UPDATE words SET wrong_count = MAX(wrong_count - 1, 0), correct_count = correct_count + 1, "
+            "round_missed = 0 WHERE id = ?",
+            (word_id,),
+        )
+        db.execute("UPDATE words SET session_state = 'done' WHERE id = ? AND session_state = 'pending'", (word_id,))
+        db.commit()
+    # if still wrong, the original wrong_count/round_missed already recorded
+    # from the first attempt stand as-is - nothing further to change
+
+    return jsonify({"correct": correct, "correct_answer": expected})
 
 
 def _session_counts(db, lesson_id):
