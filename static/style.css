@@ -159,6 +159,31 @@ table.words tr.known-row { background: var(--known); }
 table.words tr.verb-row td:first-child { padding-left: 26px; }
 table.words tr.editing-row { background: #fffceb; }
 
+.mistake-icon {
+    display: inline-flex;
+    vertical-align: middle;
+    color: var(--warn);
+    margin-left: 6px;
+}
+.mistake-icon svg { width: 14px; height: 14px; }
+
+.filter-row {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin: 0 0 14px;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+.filter-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+.filter-check input[type="checkbox"] { width: 15px; height: 15px; }
+
 .edit-input {
     font: inherit;
     width: 100%;

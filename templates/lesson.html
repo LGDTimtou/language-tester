@@ -34,6 +34,12 @@
         </div>
     </div>
 
+    <div class="filter-row">
+        <button id="sort-toggle-btn" class="secondary"></button>
+        <label class="filter-check"><input type="checkbox" id="hide-known-cb"> Hide known</label>
+        <label class="filter-check"><input type="checkbox" id="hide-correct-last-cb"> Hide correct last quiz</label>
+    </div>
+
     <table class="words">
         <thead>
             <tr>
@@ -51,9 +57,18 @@
 const lessonId = {{ lesson['id'] }};
 const EDIT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>`;
 const SAVE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`;
+const MISTAKE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
 
 let allWords = [];
 let editMode = false;
+let sortDirection = localStorage.getItem('sortDirection') || 'asc'; // asc = worst (lowest correct%) first
+let hideKnown = localStorage.getItem('hideKnown') === 'true';
+let hideCorrectLastQuiz = localStorage.getItem('hideCorrectLastQuiz') === 'true';
+
+function mistakeIconHtml(w) {
+    if (w.last_round_missed !== true) return '';
+    return `<span class="mistake-icon" title="Missed at least once in your last quiz round">${MISTAKE_ICON}</span>`;
+}
 
 function correctPctClass(w) {
     if (w.wrong_pct === null) return 'none';
@@ -69,17 +84,32 @@ function correctPctText(w) {
 
 function sortWords() {
     allWords.sort((a, b) => {
+        // known words always sink to the bottom, regardless of sort direction
         if (a.known !== b.known) return a.known ? 1 : -1;
-        const aw = a.wrong_pct === null ? -1 : a.wrong_pct;
-        const bw = b.wrong_pct === null ? -1 : b.wrong_pct;
-        return bw - aw;
+        // never-attempted words form their own fixed group: after tested
+        // words, before known ones, in either sort direction
+        const aTested = a.wrong_pct !== null;
+        const bTested = b.wrong_pct !== null;
+        if (aTested !== bTested) return aTested ? -1 : 1;
+        if (!aTested) return 0;
+        const aCorrect = 100 - a.wrong_pct;
+        const bCorrect = 100 - b.wrong_pct;
+        return sortDirection === 'asc' ? aCorrect - bCorrect : bCorrect - aCorrect;
+    });
+}
+
+function visibleWords() {
+    return allWords.filter(w => {
+        if (hideKnown && w.known) return false;
+        if (hideCorrectLastQuiz && w.last_round_missed === false) return false;
+        return true;
     });
 }
 
 function rerenderRows() {
     const tbody = document.getElementById('word-rows');
     tbody.innerHTML = '';
-    allWords.forEach(w => tbody.appendChild(renderRow(w)));
+    visibleWords().forEach(w => tbody.appendChild(renderRow(w)));
 }
 
 function escapeHtml(s) {
@@ -96,7 +126,7 @@ function renderDisplayRow(tr, w) {
     const tenseBadge = w.tense ? `<span class="tense-badge">${w.tense}</span>` : '';
 
     tr.innerHTML = `
-        <td>${escapeHtml(w.swedish)}${tenseBadge}</td>
+        <td>${escapeHtml(w.swedish)}${tenseBadge}${mistakeIconHtml(w)}</td>
         <td>${escapeHtml(w.english)}</td>
         <td class="correct-pct ${correctPctClass(w)}">${correctPctText(w)}</td>
         <td><input type="checkbox" ${w.known ? 'checked' : ''}></td>
@@ -120,7 +150,7 @@ function renderEditableRow(tr, w) {
     const tenseBadge = w.tense ? `<span class="tense-badge">${w.tense}</span>` : '';
 
     tr.innerHTML = `
-        <td><input type="text" class="edit-input edit-swedish" value="${escapeHtml(w.swedish)}">${tenseBadge}</td>
+        <td><input type="text" class="edit-input edit-swedish" value="${escapeHtml(w.swedish)}">${tenseBadge}${mistakeIconHtml(w)}</td>
         <td><input type="text" class="edit-input edit-english" value="${escapeHtml(w.english)}"></td>
         <td class="correct-pct ${correctPctClass(w)}">${correctPctText(w)}</td>
         <td><input type="checkbox" ${w.known ? 'checked' : ''}></td>
@@ -189,6 +219,7 @@ async function saveAllEdits() {
     btn.disabled = false;
     editMode = false;
     setEditToggleButton();
+    setFilterControlsDisabled(false);
     document.querySelectorAll('#word-rows tr').forEach(tr => {
         const w = allWords.find(x => String(x.id) === tr.dataset.id);
         renderDisplayRow(tr, w);
@@ -202,6 +233,7 @@ document.getElementById('edit-toggle-btn').addEventListener('click', () => {
     } else {
         editMode = true;
         setEditToggleButton();
+        setFilterControlsDisabled(true);
         document.querySelectorAll('#word-rows tr').forEach(tr => {
             const w = allWords.find(x => String(x.id) === tr.dataset.id);
             renderEditableRow(tr, w);
@@ -230,10 +262,18 @@ async function loadQuizActions() {
             location.href = `/quiz/${lessonId}`;
         });
     } else {
-        area.innerHTML = `<button id="quiz-btn">Quiz this lesson</button>`;
+        const mistakesBtn = status.mistake_count > 0
+            ? `<button class="secondary" id="mistakes-btn">Exercise mistakes (${status.mistake_count})</button>`
+            : '';
+        area.innerHTML = `<button id="quiz-btn">Quiz this lesson</button>${mistakesBtn}`;
         document.getElementById('quiz-btn').addEventListener('click', () => {
             location.href = `/quiz/${lessonId}`;
         });
+        if (status.mistake_count > 0) {
+            document.getElementById('mistakes-btn').addEventListener('click', () => {
+                location.href = `/quiz/${lessonId}?mode=mistakes`;
+            });
+        }
     }
 }
 
@@ -243,6 +283,40 @@ document.getElementById('reset-btn').addEventListener('click', async () => {
     loadWords();
     loadQuizActions();
 });
+
+function updateSortButton() {
+    document.getElementById('sort-toggle-btn').textContent =
+        sortDirection === 'asc' ? 'Sort: Worst first ↑' : 'Sort: Best first ↓';
+}
+updateSortButton();
+document.getElementById('sort-toggle-btn').addEventListener('click', () => {
+    sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    localStorage.setItem('sortDirection', sortDirection);
+    updateSortButton();
+    sortWords();
+    rerenderRows();
+});
+
+const hideKnownCb = document.getElementById('hide-known-cb');
+const hideCorrectLastCb = document.getElementById('hide-correct-last-cb');
+hideKnownCb.checked = hideKnown;
+hideCorrectLastCb.checked = hideCorrectLastQuiz;
+hideKnownCb.addEventListener('change', (e) => {
+    hideKnown = e.target.checked;
+    localStorage.setItem('hideKnown', hideKnown);
+    rerenderRows();
+});
+hideCorrectLastCb.addEventListener('change', (e) => {
+    hideCorrectLastQuiz = e.target.checked;
+    localStorage.setItem('hideCorrectLastQuiz', hideCorrectLastQuiz);
+    rerenderRows();
+});
+
+function setFilterControlsDisabled(disabled) {
+    document.getElementById('sort-toggle-btn').disabled = disabled;
+    hideKnownCb.disabled = disabled;
+    hideCorrectLastCb.disabled = disabled;
+}
 
 loadWords();
 loadQuizActions();

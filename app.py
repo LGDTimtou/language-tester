@@ -57,6 +57,9 @@ def word_stats_row(row):
         "total": total,
         "wrong_pct": wrong_pct,
         "known": bool(row["known"]),
+        # tri-state: null = never in a completed round, true = missed at
+        # least once last round, false = correct on the first try last round
+        "last_round_missed": None if row["last_round_missed"] is None else bool(row["last_round_missed"]),
     }
 
 
@@ -141,8 +144,12 @@ def api_set_known(word_id):
     db = get_db()
     known = 1 if request.get_json(force=True).get("known") else 0
     if known:
-        # a known word is never part of an active quiz round
-        cur = db.execute("UPDATE words SET known = 1, session_state = NULL WHERE id = ?", (word_id,))
+        # a known word is never part of an active quiz round, and shouldn't
+        # carry a stale "missed last time" flag
+        cur = db.execute(
+            "UPDATE words SET known = 1, session_state = NULL, last_round_missed = NULL WHERE id = ?",
+            (word_id,),
+        )
     else:
         cur = db.execute("UPDATE words SET known = 0 WHERE id = ?", (word_id,))
     if cur.rowcount == 0:
@@ -218,7 +225,14 @@ def api_quiz_status(lesson_id):
     """Read-only: never starts, resumes, or resets a round (unlike quiz-next)."""
     db = get_db()
     pending, done = _session_counts(db, lesson_id)
-    return jsonify({"pending": pending, "done": done, "total": pending + done, "in_progress": pending > 0})
+    mistake_count = db.execute(
+        "SELECT COUNT(*) FROM words WHERE lesson_id = ? AND known = 0 AND last_round_missed = 1",
+        (lesson_id,),
+    ).fetchone()[0]
+    return jsonify({
+        "pending": pending, "done": done, "total": pending + done,
+        "in_progress": pending > 0, "mistake_count": mistake_count,
+    })
 
 
 @app.route("/api/lessons/<int:lesson_id>/quiz-restart", methods=["POST"])
@@ -226,7 +240,10 @@ def api_quiz_restart(lesson_id):
     """Abandon the current round only - correct/wrong counts and known flags
     are untouched, so this doesn't lose any learning history."""
     db = get_db()
-    db.execute("UPDATE words SET session_state = NULL, round_missed = 0 WHERE lesson_id = ?", (lesson_id,))
+    db.execute(
+        "UPDATE words SET session_state = NULL, round_missed = 0 WHERE lesson_id = ?", (lesson_id,)
+    )
+    db.execute("UPDATE lessons SET active_round_type = NULL WHERE id = ?", (lesson_id,))
     db.commit()
     return jsonify({"ok": True})
 
@@ -234,14 +251,22 @@ def api_quiz_restart(lesson_id):
 @app.route("/api/lessons/<int:lesson_id>/quiz-next")
 def api_quiz_next(lesson_id):
     db = get_db()
+    mode = request.args.get("mode", "full")
+    if mode not in ("full", "mistakes"):
+        mode = "full"
     pending, done = _session_counts(db, lesson_id)
 
     if pending == 0 and done == 0:
-        # no round in progress: start a fresh one covering every not-known word
+        # no round in progress: start a fresh one
+        if mode == "mistakes":
+            where = "known = 0 AND last_round_missed = 1"
+        else:
+            where = "known = 0"
         db.execute(
-            "UPDATE words SET session_state = 'pending', round_missed = 0 WHERE lesson_id = ? AND known = 0",
+            f"UPDATE words SET session_state = 'pending', round_missed = 0 WHERE lesson_id = ? AND {where}",
             (lesson_id,),
         )
+        db.execute("UPDATE lessons SET active_round_type = ? WHERE id = ?", (mode, lesson_id))
         db.commit()
         pending, done = _session_counts(db, lesson_id)
 
@@ -250,17 +275,31 @@ def api_quiz_next(lesson_id):
         # score = % of this round's words gotten right on the first try
         score = None
         if done > 0:
+            # remember which words were missed this round, for "exercise mistakes"
+            # and the mistake icon - independent of the transient round_missed flag,
+            # which gets wiped below when the round closes out
+            db.execute(
+                "UPDATE words SET last_round_missed = round_missed WHERE lesson_id = ? AND session_state = 'done'",
+                (lesson_id,),
+            )
             row = db.execute(
                 "SELECT SUM(round_missed = 0) AS first_try FROM words WHERE lesson_id = ? AND session_state = 'done'",
                 (lesson_id,),
             ).fetchone()
             score = round(100 * (row["first_try"] or 0) / done)
-            lesson = db.execute("SELECT best_score FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
-            if lesson["best_score"] is None or score > lesson["best_score"]:
-                db.execute("UPDATE lessons SET best_score = ? WHERE id = ?", (score, lesson_id))
+
+            lesson = db.execute(
+                "SELECT best_score, active_round_type FROM lessons WHERE id = ?", (lesson_id,)
+            ).fetchone()
+            # a mistakes-only round drills a small subset, so its score isn't
+            # comparable to the full-lesson best score
+            if lesson["active_round_type"] != "mistakes":
+                if lesson["best_score"] is None or score > lesson["best_score"]:
+                    db.execute("UPDATE lessons SET best_score = ? WHERE id = ?", (score, lesson_id))
 
         # reset so the *next* call starts a brand new round
         db.execute("UPDATE words SET session_state = NULL, round_missed = 0 WHERE lesson_id = ?", (lesson_id,))
+        db.execute("UPDATE lessons SET active_round_type = NULL WHERE id = ?", (lesson_id,))
         db.commit()
         return jsonify({"word": None, "pending": 0, "done": done, "total": done, "score": score})
 
@@ -295,11 +334,11 @@ def api_quiz_next(lesson_id):
 def api_reset_progress(lesson_id):
     db = get_db()
     db.execute(
-        "UPDATE words SET correct_count = 0, wrong_count = 0, known = 0, session_state = NULL, round_missed = 0 "
-        "WHERE lesson_id = ?",
+        "UPDATE words SET correct_count = 0, wrong_count = 0, known = 0, session_state = NULL, "
+        "round_missed = 0, last_round_missed = NULL WHERE lesson_id = ?",
         (lesson_id,),
     )
-    db.execute("UPDATE lessons SET best_score = NULL WHERE id = ?", (lesson_id,))
+    db.execute("UPDATE lessons SET best_score = NULL, active_round_type = NULL WHERE id = ?", (lesson_id,))
     db.commit()
     return jsonify({"ok": True})
 

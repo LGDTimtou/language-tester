@@ -11,7 +11,7 @@
     <a class="back-link" href="/lesson/{{ lesson['id'] }}">&larr; {{ lesson['title'] }}</a>
     <header class="top">
         <div>
-            <h1>Quiz: {{ lesson['number'] }}. {{ lesson['title'] }}</h1>
+            <h1 id="quiz-heading">Quiz: {{ lesson['number'] }}. {{ lesson['title'] }}</h1>
         </div>
     </header>
 
@@ -25,6 +25,13 @@
 
 <script>
 const lessonId = {{ lesson['id'] }};
+const quizMode = new URLSearchParams(location.search).get('mode') === 'mistakes' ? 'mistakes' : 'full';
+if (quizMode === 'mistakes') {
+    // string-replace on the already-escaped heading text, so titles with
+    // apostrophes/quotes never get re-embedded into a JS string literal
+    const heading = document.getElementById('quiz-heading');
+    heading.textContent = heading.textContent.replace(/^Quiz:/, 'Exercise mistakes:');
+}
 let current = null;      // current word object
 let progress = {pending: 0, done: 0, total: 0, score: null};
 let answered = false;
@@ -70,8 +77,9 @@ function renderQuizArea() {
     const area = document.getElementById('quiz-area');
     if (!current) {
         if (progress.done > 0 && progress.score !== null && progress.score !== undefined) {
+            const title = quizMode === 'mistakes' ? '🎉 Mistakes practice complete!' : '🎉 Round complete!';
             area.innerHTML = `<div class="quiz-card">
-                <div class="finished-note">🎉 Round complete!</div>
+                <div class="finished-note">${title}</div>
                 <div class="round-score ${scoreClass(progress.score)}">${progress.score}%</div>
                 <div class="round-score-label">correct on the first try (${progress.done} word${progress.done === 1 ? '' : 's'})</div>
                 <div class="quiz-buttons">
@@ -80,10 +88,12 @@ function renderQuizArea() {
                 </div>
             </div>`;
         } else {
+            const message = quizMode === 'mistakes'
+                ? 'No mistakes to practice — nice work! 🎉'
+                : 'You already know every word in this lesson!';
             area.innerHTML = `<div class="quiz-card">
-                <div class="finished-note">You already know every word in this lesson!</div>
+                <div class="finished-note">${message}</div>
                 <div class="quiz-buttons">
-                    <button id="restart-btn">Start another round</button>
                     <a class="btn secondary" href="/lesson/${lessonId}">Back to word list</a>
                 </div>
             </div>`;
@@ -171,7 +181,7 @@ async function onKnowWell() {
 async function loadNext() {
     answered = false;
     advancing = false;
-    const res = await fetch(`/api/lessons/${lessonId}/quiz-next`);
+    const res = await fetch(`/api/lessons/${lessonId}/quiz-next?mode=${quizMode}`);
     const data = await res.json();
     current = data.word;
     progress = {pending: data.pending, done: data.done, total: data.total, score: data.score};

@@ -313,7 +313,8 @@ def init_db(conn):
         number INTEGER NOT NULL,
         title TEXT NOT NULL,
         folder TEXT NOT NULL UNIQUE,
-        best_score INTEGER
+        best_score INTEGER,
+        active_round_type TEXT
     );
     CREATE TABLE IF NOT EXISTS words (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,6 +329,7 @@ def init_db(conn):
         order_index INTEGER NOT NULL,
         session_state TEXT,
         round_missed INTEGER NOT NULL DEFAULT 0,
+        last_round_missed INTEGER,
         UNIQUE(lesson_id, swedish, tense, order_index)
     );
     """)
@@ -336,9 +338,13 @@ def init_db(conn):
         conn.execute("ALTER TABLE words ADD COLUMN session_state TEXT")
     if "round_missed" not in word_cols:
         conn.execute("ALTER TABLE words ADD COLUMN round_missed INTEGER NOT NULL DEFAULT 0")
+    if "last_round_missed" not in word_cols:
+        conn.execute("ALTER TABLE words ADD COLUMN last_round_missed INTEGER")
     lesson_cols = [r[1] for r in conn.execute("PRAGMA table_info(lessons)")]
     if "best_score" not in lesson_cols:
         conn.execute("ALTER TABLE lessons ADD COLUMN best_score INTEGER")
+    if "active_round_type" not in lesson_cols:
+        conn.execute("ALTER TABLE lessons ADD COLUMN active_round_type TEXT")
     conn.commit()
 
 
