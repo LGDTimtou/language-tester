@@ -46,6 +46,7 @@
                 <th>English</th>
                 <th>Correct %</th>
                 <th>Known</th>
+                <th></th>
             </tr>
         </thead>
         <tbody id="word-rows"></tbody>
@@ -59,11 +60,15 @@ const SAVE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const MISTAKE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
 const ARROW_UP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>`;
 const ARROW_DOWN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>`;
+const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>`;
 
 let allWords = [];
 let editMode = false;
 let sortDirection = localStorage.getItem('sortDirection') || 'asc'; // asc = worst (lowest correct%) first
 let hideKnown = localStorage.getItem('hideKnown') === 'true';
+let newRows = [];          // drafts added via "+ Add word", not yet saved
+let pendingDeleteIds = [];  // word ids staged for deletion, sent on Save
+let tempIdCounter = 0;
 
 function mistakeIconHtml(w) {
     if (w.last_round_missed !== true) return '';
@@ -126,6 +131,7 @@ function renderDisplayRow(tr, w) {
         <td>${escapeHtml(w.english)}</td>
         <td class="correct-pct ${correctPctClass(w)}">${correctPctText(w)}</td>
         <td><input type="checkbox" ${w.known ? 'checked' : ''}></td>
+        <td></td>
     `;
     tr.querySelector('input').addEventListener('change', async (e) => {
         await fetch(`/api/words/${w.id}/known`, {
@@ -150,6 +156,7 @@ function renderEditableRow(tr, w) {
         <td><input type="text" class="edit-input edit-english" value="${escapeHtml(w.english)}"></td>
         <td class="correct-pct ${correctPctClass(w)}">${correctPctText(w)}</td>
         <td><input type="checkbox" ${w.known ? 'checked' : ''}></td>
+        <td><button class="icon-btn danger small" data-action="delete" title="Delete this word" aria-label="Delete this word">${TRASH_ICON}</button></td>
     `;
     tr.querySelector('input[type="checkbox"]').addEventListener('change', async (e) => {
         await fetch(`/api/words/${w.id}/known`, {
@@ -165,6 +172,51 @@ function renderEditableRow(tr, w) {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); saveAllEdits(); }
         });
+    });
+    tr.querySelector('[data-action="delete"]').addEventListener('click', () => {
+        if (!confirm(`Delete "${w.swedish}"? This can't be undone.`)) return;
+        pendingDeleteIds.push(w.id);
+        allWords = allWords.filter(x => x.id !== w.id);
+        tr.remove();
+    });
+}
+
+function renderNewRow(draft) {
+    const tr = document.createElement('tr');
+    tr.classList.add('editing-row');
+    tr.dataset.tempId = draft.tempId;
+    tr.innerHTML = `
+        <td><input type="text" class="edit-input new-swedish" placeholder="Swedish word"></td>
+        <td><input type="text" class="edit-input new-english" placeholder="English"></td>
+        <td class="correct-pct none">—</td>
+        <td></td>
+        <td><button class="icon-btn danger small" data-action="remove-draft" title="Remove" aria-label="Remove">${TRASH_ICON}</button></td>
+    `;
+    tr.querySelectorAll('.edit-input').forEach(input => {
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); saveAllEdits(); }
+        });
+    });
+    tr.querySelector('[data-action="remove-draft"]').addEventListener('click', () => {
+        newRows = newRows.filter(d => d.tempId !== draft.tempId);
+        tr.remove();
+    });
+    return tr;
+}
+
+function appendAddRowFooter() {
+    const tbody = document.getElementById('word-rows');
+    const tr = document.createElement('tr');
+    tr.id = 'add-word-row';
+    tr.innerHTML = `<td colspan="5"><button class="secondary" id="add-word-btn">+ Add word</button></td>`;
+    tbody.appendChild(tr);
+    document.getElementById('add-word-btn').addEventListener('click', () => {
+        tempIdCounter++;
+        const draft = {tempId: `new${tempIdCounter}`};
+        newRows.push(draft);
+        const newTr = renderNewRow(draft);
+        tbody.insertBefore(newTr, tr);
+        newTr.querySelector('.new-swedish').focus();
     });
 }
 
@@ -198,8 +250,16 @@ function setEditToggleButton() {
 async function saveAllEdits() {
     const btn = document.getElementById('edit-toggle-btn');
     btn.disabled = true;
+
+    for (const id of pendingDeleteIds) {
+        await fetch(`/api/words/${id}`, {method: 'DELETE'});
+    }
+    pendingDeleteIds = [];
+
     for (const tr of document.querySelectorAll('#word-rows tr')) {
+        if (!tr.dataset.id) continue; // skip the add-word footer and new-word drafts
         const w = allWords.find(x => String(x.id) === tr.dataset.id);
+        if (!w) continue;
         const swedishInput = tr.querySelector('.edit-swedish');
         const englishInput = tr.querySelector('.edit-english');
         const swedish = swedishInput.value.trim();
@@ -212,15 +272,30 @@ async function saveAllEdits() {
         });
         Object.assign(w, await res.json());
     }
+
+    for (const draft of newRows) {
+        const tr = document.querySelector(`#word-rows tr[data-temp-id="${draft.tempId}"]`);
+        if (!tr) continue;
+        const swedish = tr.querySelector('.new-swedish').value.trim();
+        const english = tr.querySelector('.new-english').value.trim();
+        if (!swedish) continue; // blank drafts are just discarded
+        const res = await fetch(`/api/lessons/${lessonId}/words`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({swedish, english})
+        });
+        allWords.push(await res.json());
+    }
+    newRows = [];
+
     btn.disabled = false;
     editMode = false;
     setEditToggleButton();
     setFilterControlsDisabled(false);
-    document.querySelectorAll('#word-rows tr').forEach(tr => {
-        const w = allWords.find(x => String(x.id) === tr.dataset.id);
-        renderDisplayRow(tr, w);
-    });
+    sortWords();
+    rerenderRows();
     updateSummary();
+    loadQuizActions();
 }
 
 document.getElementById('edit-toggle-btn').addEventListener('click', () => {
@@ -228,12 +303,15 @@ document.getElementById('edit-toggle-btn').addEventListener('click', () => {
         saveAllEdits();
     } else {
         editMode = true;
+        newRows = [];
+        pendingDeleteIds = [];
         setEditToggleButton();
         setFilterControlsDisabled(true);
         document.querySelectorAll('#word-rows tr').forEach(tr => {
             const w = allWords.find(x => String(x.id) === tr.dataset.id);
             renderEditableRow(tr, w);
         });
+        appendAddRowFooter();
         const first = document.querySelector('.edit-swedish');
         if (first) first.focus();
     }

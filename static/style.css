@@ -158,6 +158,7 @@ table.words tr:last-child td { border-bottom: none; }
 table.words tr.known-row { background: var(--known); }
 table.words tr.verb-row td:first-child { padding-left: 26px; }
 table.words tr.editing-row { background: #fffceb; }
+table.words #add-word-row td { text-align: center; padding: 10px; }
 
 .mistake-icon {
     display: inline-flex;
@@ -235,6 +236,8 @@ table.words tr.editing-row { background: #fffceb; }
 .icon-btn.danger { color: var(--bad); border-color: var(--bad); }
 .icon-btn.danger:hover { background: #fdeeee; }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.icon-btn.small { width: 28px; height: 28px; border-radius: 6px; }
+.icon-btn.small svg { width: 14px; height: 14px; }
 
 button, .btn {
     font: inherit;

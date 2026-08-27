@@ -123,6 +123,28 @@ def api_lesson_words(lesson_id):
     return jsonify([word_stats_row(r) for r in rows])
 
 
+@app.route("/api/lessons/<int:lesson_id>/words", methods=["POST"])
+def api_create_word(lesson_id):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM lessons WHERE id = ?", (lesson_id,)).fetchone():
+        abort(404)
+    body = request.get_json(force=True)
+    swedish = (body.get("swedish") or "").strip()
+    english = (body.get("english") or "").strip()
+    if not swedish:
+        return jsonify({"error": "Swedish text can't be empty"}), 400
+    next_order = db.execute(
+        "SELECT COALESCE(MAX(order_index), -1) + 1 FROM words WHERE lesson_id = ?", (lesson_id,)
+    ).fetchone()[0]
+    cur = db.execute(
+        "INSERT INTO words (lesson_id, swedish, english, order_index) VALUES (?, ?, ?, ?)",
+        (lesson_id, swedish, english, next_order),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM words WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(word_stats_row(row)), 201
+
+
 @app.route("/api/words/<int:word_id>", methods=["PATCH"])
 def api_update_word(word_id):
     db = get_db()
@@ -137,6 +159,16 @@ def api_update_word(word_id):
     db.commit()
     row = db.execute("SELECT * FROM words WHERE id = ?", (word_id,)).fetchone()
     return jsonify(word_stats_row(row))
+
+
+@app.route("/api/words/<int:word_id>", methods=["DELETE"])
+def api_delete_word(word_id):
+    db = get_db()
+    cur = db.execute("DELETE FROM words WHERE id = ?", (word_id,))
+    if cur.rowcount == 0:
+        abort(404)
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/words/<int:word_id>/known", methods=["POST"])
