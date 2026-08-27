@@ -275,13 +275,6 @@ def api_quiz_next(lesson_id):
         # score = % of this round's words gotten right on the first try
         score = None
         if done > 0:
-            # remember which words were missed this round, for "exercise mistakes"
-            # and the mistake icon - independent of the transient round_missed flag,
-            # which gets wiped below when the round closes out
-            db.execute(
-                "UPDATE words SET last_round_missed = round_missed WHERE lesson_id = ? AND session_state = 'done'",
-                (lesson_id,),
-            )
             row = db.execute(
                 "SELECT SUM(round_missed = 0) AS first_try FROM words WHERE lesson_id = ? AND session_state = 'done'",
                 (lesson_id,),
@@ -291,9 +284,17 @@ def api_quiz_next(lesson_id):
             lesson = db.execute(
                 "SELECT best_score, active_round_type FROM lessons WHERE id = ?", (lesson_id,)
             ).fetchone()
-            # a mistakes-only round drills a small subset, so its score isn't
-            # comparable to the full-lesson best score
+            # only a full round updates what "missed last time" means and the
+            # best score - a mistakes-practice round is a smaller, easier
+            # subset, so its own result shouldn't overwrite either record.
+            # This is what keeps the "exercise mistakes" button in place
+            # (and doesn't reduce its count) after practicing: it only ever
+            # changes on the next full round.
             if lesson["active_round_type"] != "mistakes":
+                db.execute(
+                    "UPDATE words SET last_round_missed = round_missed WHERE lesson_id = ? AND session_state = 'done'",
+                    (lesson_id,),
+                )
                 if lesson["best_score"] is None or score > lesson["best_score"]:
                     db.execute("UPDATE lessons SET best_score = ? WHERE id = ?", (score, lesson_id))
 
