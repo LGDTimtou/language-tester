@@ -556,3 +556,29 @@ input[type="checkbox"] { width: 17px; height: 17px; cursor: pointer; }
 }
 .check-progress { color: var(--muted); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
 #check-btn { padding: 10px 28px; }
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 25, 35, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 50;
+}
+.modal-overlay.open { display: flex; }
+.modal-card {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 32px 28px;
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+}
+.modal-emoji { font-size: 2.6rem; line-height: 1; }
+.modal-card h2 { margin: 12px 0 6px; font-size: 1.25rem; }
+.modal-card p { color: var(--muted); margin: 0 0 22px; }
+.modal-buttons { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.modal-buttons .btn { text-decoration: none; }

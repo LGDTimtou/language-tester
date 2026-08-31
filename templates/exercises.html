@@ -32,6 +32,18 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="done-modal">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="done-modal-title">
+        <div class="modal-emoji">🎉</div>
+        <h2 id="done-modal-title">Everything correct!</h2>
+        <p>You got every exercise in this lesson right.</p>
+        <div class="modal-buttons">
+            <a class="btn" href="/lesson/{{ lesson['id'] }}">Back to word list</a>
+            <button class="btn secondary" id="modal-review-btn">Stay and review</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const lessonId = {{ lesson['id'] }};
 
@@ -340,19 +352,39 @@ async function runCheck() {
     });
 
     updateSummary(data.graded_solved, data.graded_total);
+    btn.disabled = false;
+
     const banner = document.getElementById('banner');
     if (data.all_solved) {
-        banner.hidden = false;
-        banner.className = 'ex-banner good';
-        banner.textContent = '🎉 Every exercise in this lesson is correct! The home page now shows a green check.';
+        banner.hidden = true;
+        openDoneModal();
     } else {
         const wrong = data.graded_total - data.graded_solved;
         banner.hidden = false;
         banner.className = 'ex-banner';
         banner.textContent = `${wrong} exercise${wrong === 1 ? '' : 's'} still not correct — fix the ✗ ones and check again.`;
+        // jump to the first thing they got wrong
+        const firstWrong = document.querySelector('.ex-item.item-wrong');
+        if (firstWrong) firstWrong.scrollIntoView({behavior: 'smooth', block: 'center'});
     }
-    btn.disabled = false;
 }
+
+function openDoneModal() {
+    document.getElementById('done-modal').classList.add('open');
+}
+function closeDoneModalAndReview() {
+    document.getElementById('done-modal').classList.remove('open');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+document.getElementById('modal-review-btn').addEventListener('click', closeDoneModalAndReview);
+document.getElementById('done-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'done-modal') closeDoneModalAndReview();  // click the backdrop
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.getElementById('done-modal').classList.contains('open')) {
+        closeDoneModalAndReview();
+    }
+});
 
 document.getElementById('check-btn').addEventListener('click', runCheck);
 
