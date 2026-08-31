@@ -23,7 +23,10 @@
     </header>
 
     <div class="actions-row spread">
-        <div class="btn-group" id="quiz-actions"></div>
+        <div class="btn-group">
+            <div id="quiz-actions" class="btn-group"></div>
+            <a class="btn secondary" id="exercises-link" href="/exercises/{{ lesson['id'] }}">Exercises</a>
+        </div>
         <div class="btn-group">
             <button id="edit-toggle-btn" class="icon-btn" title="Edit vocabulary" aria-label="Edit vocabulary">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>
@@ -386,8 +389,21 @@ function setFilterControlsDisabled(disabled) {
     hideKnownCb.disabled = disabled;
 }
 
+async function loadExercisesLink() {
+    const link = document.getElementById('exercises-link');
+    try {
+        const res = await fetch(`/api/lessons/${lessonId}/exercises`);
+        const data = await res.json();
+        if (!data.items.length) { link.textContent = 'Exercises'; return; }
+        const done = data.graded_solved === data.graded_total && data.graded_total > 0;
+        link.textContent = `Exercises (${data.graded_solved}/${data.graded_total})`;
+        link.classList.toggle('done', done);
+    } catch (e) { /* leave the plain label */ }
+}
+
 loadWords();
 loadQuizActions();
+loadExercisesLink();
 </script>
 </body>
 </html>

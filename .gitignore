@@ -1,6 +1,7 @@
 # contains vocabulary/translations extracted from copyrighted Patreon content
 vocab.db
 *.sqlite3
+exercises_data/
 
 # python
 venv/

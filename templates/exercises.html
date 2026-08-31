@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exercises: {{ lesson['title'] }} — Swedish Vocab Trainer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+    <a class="back-link" href="/lesson/{{ lesson['id'] }}">&larr; {{ lesson['title'] }}</a>
+    <header class="top">
+        <div>
+            <h1>Exercises: {{ lesson['number'] }}. {{ lesson['title'] }}</h1>
+            <div class="subtitle" id="summary">Loading…</div>
+        </div>
+        <div class="btn-group">
+            <button id="reset-btn" class="icon-btn danger" title="Reset exercise progress" aria-label="Reset exercise progress">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path></svg>
+            </button>
+        </div>
+    </header>
+
+    <div id="banner" hidden></div>
+    <div id="exercise-area">Loading…</div>
+</div>
+
+<div class="check-bar">
+    <div class="wrap check-bar-inner">
+        <span id="check-progress" class="check-progress"></span>
+        <button id="check-btn">Check</button>
+    </div>
+</div>
+
+<script>
+const lessonId = {{ lesson['id'] }};
+
+const CHECK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+const CROSS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+
+let items = [];
+let checkedOnce = false;
+let saveTimer = null;
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : s;
+    return d.innerHTML;
+}
+
+// ---------- rendering ----------
+
+function inputEl(cls, value) {
+    const i = document.createElement('input');
+    i.type = 'text';
+    i.className = cls;
+    i.autocomplete = 'off';
+    i.spellcheck = false;
+    if (value != null) i.value = value;
+    i.addEventListener('input', scheduleSave);
+    return i;
+}
+
+function renderTextBody(container, it) {
+    const prompt = it.prompt || '';
+    const nBlanks = (it.render && it.render.n_blanks) || 1;
+    const segs = prompt.split(/_{2,}/);
+    const wrap = document.createElement('div');
+    wrap.className = 'ex-prompt';
+    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
+
+    if (segs.length > 1) {
+        segs.forEach((seg, idx) => {
+            if (seg) wrap.appendChild(document.createTextNode(seg));
+            if (idx < segs.length - 1) {
+                wrap.appendChild(inputEl('ex-input ex-blank', last[idx] || ''));
+            }
+        });
+        // top up if the author declared more blanks than the prompt shows
+        for (let k = segs.length - 1; k < nBlanks; k++) {
+            wrap.appendChild(inputEl('ex-input ex-blank', last[k] || ''));
+        }
+    } else {
+        wrap.appendChild(document.createTextNode(prompt + ' '));
+        for (let k = 0; k < nBlanks; k++) {
+            wrap.appendChild(inputEl('ex-input ex-blank', last[k] || ''));
+        }
+    }
+    container.appendChild(wrap);
+}
+
+function renderSetBody(container, it) {
+    const n = (it.render && it.render.n_required) || 1;
+    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
+    const p = document.createElement('div');
+    p.className = 'ex-prompt';
+    p.textContent = it.prompt + ` (${n})`;
+    container.appendChild(p);
+    const list = document.createElement('div');
+    list.className = 'ex-set';
+    for (let k = 0; k < n; k++) list.appendChild(inputEl('ex-input', last[k] || ''));
+    container.appendChild(list);
+}
+
+function renderChoiceBody(container, it) {
+    const opts = (it.render && it.render.options) || [];
+    const p = document.createElement('div');
+    p.className = 'ex-prompt';
+    p.textContent = (it.prompt || '').replace(/_{2,}/, ' ___ ');
+    container.appendChild(p);
+    const list = document.createElement('div');
+    list.className = 'ex-choices';
+    opts.forEach(opt => {
+        const id = `ch-${it.id}-${opt}`;
+        const label = document.createElement('label');
+        label.className = 'ex-choice';
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = `choice-${it.id}`;
+        radio.value = opt;
+        radio.id = id;
+        if (it.last_answer === opt) radio.checked = true;
+        radio.addEventListener('change', scheduleSave);
+        label.appendChild(radio);
+        label.appendChild(document.createTextNode(' ' + opt));
+        list.appendChild(label);
+    });
+    container.appendChild(list);
+}
+
+function renderTableBody(container, it) {
+    const rows = (it.render && it.render.rows) || [];
+    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
+    const p = document.createElement('div');
+    p.className = 'ex-prompt';
+    p.textContent = it.prompt;
+    container.appendChild(p);
+
+    const table = document.createElement('table');
+    table.className = 'ex-table';
+    table.innerHTML = '<thead><tr><th>Swedish</th><th>English</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    let blankIdx = 0;
+    rows.forEach(r => {
+        const tr = document.createElement('tr');
+        const tdSv = document.createElement('td');
+        const tdEn = document.createElement('td');
+        const givenSv = r.given_side === 'sv';
+        if (givenSv) {
+            tdSv.textContent = r.given;
+            if (r.blank) { const bi = blankIdx++; tdEn.appendChild(inputEl('ex-input', last[bi] || '')); }
+            else tdEn.textContent = '';
+        } else {
+            tdEn.textContent = r.given;
+            if (r.blank) { const bi = blankIdx++; tdSv.appendChild(inputEl('ex-input', last[bi] || '')); }
+            else tdSv.textContent = '';
+        }
+        tr.appendChild(tdSv);
+        tr.appendChild(tdEn);
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    container.appendChild(table);
+}
+
+function renderOpenBody(container, it) {
+    const p = document.createElement('div');
+    p.className = 'ex-prompt';
+    p.textContent = it.prompt;
+    container.appendChild(p);
+
+    const ta = document.createElement('textarea');
+    ta.className = 'ex-textarea';
+    ta.rows = 3;
+    ta.value = (typeof it.last_answer === 'string') ? it.last_answer : '';
+    ta.addEventListener('input', scheduleSave);
+    container.appendChild(ta);
+
+    const foot = document.createElement('div');
+    foot.className = 'ex-open-foot';
+    const label = document.createElement('label');
+    label.className = 'filter-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!it.self_done;
+    cb.addEventListener('change', async () => {
+        await fetch(`/api/exercises/${it.id}/self-done`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({done: cb.checked, answer: ta.value}),
+        });
+        it.self_done = cb.checked;
+        refDiv.hidden = !(cb.checked || checkedOnce) || !(it.reference && it.reference.length);
+        updateSummary();
+    });
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' Mark done'));
+    foot.appendChild(label);
+    container.appendChild(foot);
+
+    const refDiv = document.createElement('div');
+    refDiv.className = 'ex-reference';
+    if (it.reference && it.reference.length) {
+        refDiv.innerHTML = '<div class="ex-reference-label">Reference answer</div>' +
+            it.reference.map(r => `<div>${escapeHtml(r)}</div>`).join('');
+    } else {
+        refDiv.innerHTML = '<div class="ex-reference-label">The PDF gives no fixed answer for this one.</div>';
+    }
+    refDiv.hidden = !(it.self_done || checkedOnce);
+    container.appendChild(refDiv);
+}
+
+const BODY_RENDERERS = {
+    text: renderTextBody, set: renderSetBody, choice: renderChoiceBody, table: renderTableBody,
+};
+
+function renderItem(it) {
+    const card = document.createElement('div');
+    card.className = 'ex-item' + (it.kind === 'open' ? ' ex-item-open' : '');
+    card.dataset.id = it.id;
+
+    const mark = document.createElement('span');
+    mark.className = 'ex-mark-slot';
+    card.appendChild(mark);
+
+    const body = document.createElement('div');
+    body.className = 'ex-body';
+    if (it.kind === 'open') renderOpenBody(body, it);
+    else (BODY_RENDERERS[it.grader] || renderTextBody)(body, it);
+    card.appendChild(body);
+
+    if (it.kind === 'graded' && it.solved) setMark(card, true);
+    return card;
+}
+
+function setMark(card, ok) {
+    card.classList.remove('item-correct', 'item-wrong');
+    card.classList.add(ok ? 'item-correct' : 'item-wrong');
+    const slot = card.querySelector('.ex-mark-slot');
+    slot.innerHTML = ok ? CHECK_ICON : CROSS_ICON;
+}
+
+function render() {
+    const area = document.getElementById('exercise-area');
+    area.innerHTML = '';
+    if (!items.length) {
+        area.innerHTML = '<div class="empty-note">No exercises have been loaded for this lesson yet. '
+            + 'Run <code>python3 parse_exercises.py</code> after authoring <code>exercises_data/'
+            + '{{ lesson["number"] }}.json</code>.</div>';
+        document.querySelector('.check-bar').hidden = true;
+        return;
+    }
+    let lastSection = null;
+    items.forEach(it => {
+        if (it.section && it.section !== lastSection) {
+            const h = document.createElement('h2');
+            h.className = 'ex-section';
+            h.textContent = it.section;
+            area.appendChild(h);
+            lastSection = it.section;
+        }
+        area.appendChild(renderItem(it));
+    });
+}
+
+// ---------- answers / actions ----------
+
+function collectAnswers() {
+    const out = {};
+    document.querySelectorAll('.ex-item').forEach(card => {
+        const id = card.dataset.id;
+        const it = items.find(x => String(x.id) === id);
+        if (!it) return;
+        if (it.kind === 'open') {
+            const ta = card.querySelector('.ex-textarea');
+            out[id] = ta ? ta.value : '';
+        } else if (it.grader === 'choice') {
+            const sel = card.querySelector('input[type="radio"]:checked');
+            out[id] = sel ? sel.value : '';
+        } else {
+            out[id] = Array.from(card.querySelectorAll('input.ex-input')).map(i => i.value);
+        }
+    });
+    return out;
+}
+
+function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+        fetch(`/api/lessons/${lessonId}/exercises/save`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({answers: collectAnswers()}),
+        });
+    }, 800);
+}
+
+function updateSummary(graded_solved, graded_total) {
+    const graded = items.filter(i => i.kind === 'graded');
+    const open = items.filter(i => i.kind === 'open');
+    const solved = graded_solved != null ? graded_solved : graded.filter(i => i.solved).length;
+    const total = graded_total != null ? graded_total : graded.length;
+    const openDone = open.filter(i => i.self_done).length;
+    let txt = `${solved} / ${total} exercises correct`;
+    if (open.length) txt += ` · ${openDone} / ${open.length} practice items marked done`;
+    document.getElementById('summary').textContent = txt;
+    document.getElementById('check-progress').textContent = `${solved} / ${total}`;
+}
+
+async function loadExercises() {
+    const res = await fetch(`/api/lessons/${lessonId}/exercises`);
+    const data = await res.json();
+    items = data.items;
+    render();
+    updateSummary(data.graded_solved, data.graded_total);
+}
+
+async function runCheck() {
+    const btn = document.getElementById('check-btn');
+    btn.disabled = true;
+    const res = await fetch(`/api/lessons/${lessonId}/exercises/check`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({answers: collectAnswers()}),
+    });
+    const data = await res.json();
+    checkedOnce = true;
+
+    document.querySelectorAll('.ex-item').forEach(card => {
+        const id = card.dataset.id;
+        if (id in data.results) {
+            const ok = data.results[id];
+            setMark(card, ok);
+            const it = items.find(x => String(x.id) === id);
+            if (it) it.solved = ok;
+        }
+    });
+    // reveal every reference now that a check has run
+    document.querySelectorAll('.ex-item-open').forEach(card => {
+        const it = items.find(x => String(x.id) === card.dataset.id);
+        const ref = card.querySelector('.ex-reference');
+        if (ref) ref.hidden = false;
+    });
+
+    updateSummary(data.graded_solved, data.graded_total);
+    const banner = document.getElementById('banner');
+    if (data.all_solved) {
+        banner.hidden = false;
+        banner.className = 'ex-banner good';
+        banner.textContent = '🎉 Every exercise in this lesson is correct! The home page now shows a green check.';
+    } else {
+        const wrong = data.graded_total - data.graded_solved;
+        banner.hidden = false;
+        banner.className = 'ex-banner';
+        banner.textContent = `${wrong} exercise${wrong === 1 ? '' : 's'} still not correct — fix the ✗ ones and check again.`;
+    }
+    btn.disabled = false;
+}
+
+document.getElementById('check-btn').addEventListener('click', runCheck);
+
+document.getElementById('reset-btn').addEventListener('click', async () => {
+    if (!confirm('Reset all exercise progress for this lesson? (Typed answers, correct marks and "done" ticks are cleared. Vocabulary quiz progress is not touched.)')) return;
+    await fetch(`/api/lessons/${lessonId}/exercises/reset`, {method: 'POST'});
+    checkedOnce = false;
+    document.getElementById('banner').hidden = true;
+    loadExercises();
+});
+
+loadExercises();
+</script>
+</body>
+</html>

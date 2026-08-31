@@ -1,9 +1,13 @@
+import json
 import os
 import re
 import sqlite3
 import unicodedata
 
 from flask import Flask, g, jsonify, render_template, request, abort
+
+from grading import grade_item
+from parse_exercises import init_exercises_db
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "vocab.db")
@@ -16,6 +20,9 @@ def get_db():
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        # make sure the exercises table exists even if parse_exercises.py has
+        # never been run (the page just shows nothing until data is loaded)
+        init_exercises_db(g.db)
     return g.db
 
 
@@ -78,6 +85,18 @@ def index():
         ORDER BY l.number
     """).fetchall()
 
+    # exercise progress per lesson: a lesson "counts as done" once every graded
+    # item is solved (open/self-check items never hold it back)
+    ex_rows = db.execute("""
+        SELECT lesson_id,
+               SUM(kind = 'graded') AS graded_total,
+               SUM(kind = 'graded' AND solved = 1) AS graded_solved,
+               COUNT(*) AS item_total
+        FROM exercise_items
+        GROUP BY lesson_id
+    """).fetchall()
+    ex_by_lesson = {r["lesson_id"]: r for r in ex_rows}
+
     lessons = []
     for r in rows:
         total = r["word_count"] or 0
@@ -85,10 +104,18 @@ def index():
         testable = total - known  # words actually in play for training (known ones are skipped)
         score = r["best_score"]
         correct_est = round(testable * score / 100) if (score is not None and testable > 0) else 0
+
+        ex = ex_by_lesson.get(r["id"])
+        ex_graded_total = (ex["graded_total"] or 0) if ex else 0
+        ex_graded_solved = (ex["graded_solved"] or 0) if ex else 0
         lessons.append({
             "id": r["id"], "number": r["number"], "title": r["title"],
             "best_score": score, "word_count": total, "testable": testable,
             "correct_est": correct_est,
+            "ex_has": bool(ex and ex["item_total"]),
+            "ex_graded_total": ex_graded_total,
+            "ex_graded_solved": ex_graded_solved,
+            "ex_complete": ex_graded_total > 0 and ex_graded_solved == ex_graded_total,
         })
 
     return render_template("index.html", lessons=lessons, score_class=score_class)
@@ -110,6 +137,15 @@ def quiz_page(lesson_id):
     if not lesson:
         abort(404)
     return render_template("quiz.html", lesson=lesson)
+
+
+@app.route("/exercises/<int:lesson_id>")
+def exercises_page(lesson_id):
+    db = get_db()
+    lesson = db.execute("SELECT * FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+    if not lesson:
+        abort(404)
+    return render_template("exercises.html", lesson=lesson)
 
 
 # ---------- API ----------
@@ -369,6 +405,155 @@ def api_reset_progress(lesson_id):
         (lesson_id,),
     )
     db.execute("UPDATE lessons SET best_score = NULL, active_round_type = NULL WHERE id = ?", (lesson_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- exercises ----------
+
+def _render_spec(grader, spec):
+    """Client-facing render hints - deliberately strips every accepted answer."""
+    if grader == "text":
+        return {"n_blanks": len(spec.get("blanks", [])) or 1}
+    if grader == "set":
+        return {"n_required": spec.get("n_required", 1)}
+    if grader == "choice":
+        return {"options": spec.get("options", [])}
+    if grader == "table":
+        return {"rows": [
+            {"given": r.get("given", ""), "given_side": r.get("given_side", "sv"),
+             "blank": bool(r.get("accept"))}
+            for r in spec.get("rows", [])
+        ]}
+    return {}
+
+
+def _exercise_rows(db, lesson_id):
+    return db.execute(
+        "SELECT * FROM exercise_items WHERE lesson_id = ? ORDER BY order_index", (lesson_id,)
+    ).fetchall()
+
+
+def _exercise_counts(rows):
+    graded = [r for r in rows if r["kind"] == "graded"]
+    solved = [r for r in graded if r["solved"]]
+    return len(graded), len(solved)
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises")
+def api_exercises(lesson_id):
+    db = get_db()
+    lesson = db.execute("SELECT id, number, title FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+    if not lesson:
+        abort(404)
+    rows = _exercise_rows(db, lesson_id)
+    graded_total, graded_solved = _exercise_counts(rows)
+
+    items = []
+    for r in rows:
+        spec = json.loads(r["spec_json"] or "{}")
+        item = {
+            "id": r["id"],
+            "section": r["section"],
+            "kind": r["kind"],
+            "grader": r["grader"],
+            "prompt": r["prompt"],
+            "solved": bool(r["solved"]),
+            "self_done": bool(r["self_done"]),
+            "last_answer": json.loads(r["last_answer_json"]) if r["last_answer_json"] else None,
+        }
+        if r["kind"] == "graded":
+            item["render"] = _render_spec(r["grader"], spec)
+        else:
+            item["reference"] = json.loads(r["reference_json"]) if r["reference_json"] else []
+        items.append(item)
+
+    return jsonify({
+        "lesson": {"id": lesson["id"], "number": lesson["number"], "title": lesson["title"]},
+        "graded_total": graded_total, "graded_solved": graded_solved,
+        "items": items,
+    })
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises/check", methods=["POST"])
+def api_exercises_check(lesson_id):
+    db = get_db()
+    answers = (request.get_json(force=True) or {}).get("answers", {})
+    rows = _exercise_rows(db, lesson_id)
+
+    results = {}
+    for r in rows:
+        if str(r["id"]) not in answers and r["id"] not in answers:
+            continue
+        given = answers.get(str(r["id"]), answers.get(r["id"]))
+        # persist whatever was typed, for both graded and open items
+        db.execute(
+            "UPDATE exercise_items SET last_answer_json = ? WHERE id = ?",
+            (json.dumps(given, ensure_ascii=False), r["id"]),
+        )
+        if r["kind"] != "graded":
+            continue
+        spec = json.loads(r["spec_json"] or "{}")
+        ok = grade_item(r["grader"], spec, given)
+        db.execute("UPDATE exercise_items SET solved = ? WHERE id = ?", (1 if ok else 0, r["id"]))
+        results[r["id"]] = ok
+
+    db.commit()
+    rows = _exercise_rows(db, lesson_id)
+    graded_total, graded_solved = _exercise_counts(rows)
+    return jsonify({
+        "results": results,
+        "graded_total": graded_total, "graded_solved": graded_solved,
+        "all_solved": graded_total > 0 and graded_solved == graded_total,
+    })
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises/save", methods=["POST"])
+def api_exercises_save(lesson_id):
+    """Autosave typed answers without grading, so a reload restores them."""
+    db = get_db()
+    answers = (request.get_json(force=True) or {}).get("answers", {})
+    ids = {r["id"] for r in _exercise_rows(db, lesson_id)}
+    for k, v in answers.items():
+        try:
+            item_id = int(k)
+        except (TypeError, ValueError):
+            continue
+        if item_id in ids:
+            db.execute(
+                "UPDATE exercise_items SET last_answer_json = ? WHERE id = ?",
+                (json.dumps(v, ensure_ascii=False), item_id),
+            )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/exercises/<int:item_id>/self-done", methods=["POST"])
+def api_exercise_self_done(item_id):
+    db = get_db()
+    body = request.get_json(force=True) or {}
+    done = 1 if body.get("done") else 0
+    cur = db.execute("UPDATE exercise_items SET self_done = ? WHERE id = ?", (done, item_id))
+    if cur.rowcount == 0:
+        abort(404)
+    if "answer" in body:
+        db.execute(
+            "UPDATE exercise_items SET last_answer_json = ? WHERE id = ?",
+            (json.dumps(body["answer"], ensure_ascii=False), item_id),
+        )
+    db.commit()
+    return jsonify({"ok": True, "self_done": bool(done)})
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises/reset", methods=["POST"])
+def api_exercises_reset(lesson_id):
+    """Clears exercise progress only (typed answers, solved, self-done)."""
+    db = get_db()
+    db.execute(
+        "UPDATE exercise_items SET solved = 0, self_done = 0, last_answer_json = NULL "
+        "WHERE lesson_id = ?",
+        (lesson_id,),
+    )
     db.commit()
     return jsonify({"ok": True})
 

@@ -18,33 +18,45 @@
     <div class="lesson-grid">
         {% for l in lessons %}
         {% set total = l['word_count'] or 0 %}
-        {% if total > 0 %}
-        <a class="lesson-card clickable" href="/lesson/{{ l['id'] }}">
-        {% else %}
-        <div class="lesson-card disabled">
-        {% endif %}
+        <div class="lesson-card {{ 'clickable' if total > 0 else 'disabled' }}">
             <div class="lesson-card-top">
                 <div class="lesson-number">LESSON {{ l['number'] }}</div>
-                {% if l['best_score'] is not none %}
-                <span class="score-badge {{ score_class(l['best_score']) }}">{{ l['best_score'] }}%</span>
-                {% endif %}
+                <div class="badge-stack">
+                    {% if l['best_score'] is not none %}
+                    <span class="score-badge {{ score_class(l['best_score']) }}">{{ l['best_score'] }}%</span>
+                    {% endif %}
+                    {% if l['ex_has'] %}
+                    <a class="ex-badge {{ 'ex-complete' if l['ex_complete'] else 'ex-incomplete' }}"
+                       href="/exercises/{{ l['id'] }}"
+                       title="Exercises: {{ l['ex_graded_solved'] }} / {{ l['ex_graded_total'] }} correct">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                        <span class="ex-mark">{{ '✓' if l['ex_complete'] else '✗' }}</span>
+                    </a>
+                    {% endif %}
+                </div>
             </div>
-            <div class="lesson-title">{{ l['title'] }}</div>
             {% if total > 0 %}
-                {% if l['testable'] > 0 %}
-                <div class="lesson-meta">{{ l['correct_est'] }} / {{ l['testable'] }}</div>
-                <div class="progress-bar score-bar {{ score_class(l['best_score']) }}"><div style="width: {{ l['best_score'] or 0 }}%"></div></div>
-                {% else %}
-                <div class="lesson-meta">All words known</div>
-                {% endif %}
+            <a class="lesson-card-main" href="/lesson/{{ l['id'] }}">
             {% else %}
-            <div class="lesson-meta">No vocabulary list for this lesson</div>
+            <div class="lesson-card-main">
             {% endif %}
-        {% if total > 0 %}
-        </a>
-        {% else %}
+                <div class="lesson-title">{{ l['title'] }}</div>
+                {% if total > 0 %}
+                    {% if l['testable'] > 0 %}
+                    <div class="lesson-meta">{{ l['correct_est'] }} / {{ l['testable'] }}</div>
+                    <div class="progress-bar score-bar {{ score_class(l['best_score']) }}"><div style="width: {{ l['best_score'] or 0 }}%"></div></div>
+                    {% else %}
+                    <div class="lesson-meta">All words known</div>
+                    {% endif %}
+                {% else %}
+                <div class="lesson-meta">No vocabulary list for this lesson</div>
+                {% endif %}
+            {% if total > 0 %}
+            </a>
+            {% else %}
+            </div>
+            {% endif %}
         </div>
-        {% endif %}
         {% endfor %}
     </div>
 </div>
