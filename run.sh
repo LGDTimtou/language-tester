@@ -16,5 +16,8 @@ if [ ! -f vocab.db ]; then
     python3 parse_vocab.py
 fi
 
+echo "Checking lesson exercises are parsed..."
+python3 parse_exercises.py
+
 echo "Starting server at http://127.0.0.1:5055"
 python3 app.py

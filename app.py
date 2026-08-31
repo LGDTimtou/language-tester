@@ -7,7 +7,7 @@ import unicodedata
 from flask import Flask, g, jsonify, render_template, request, abort
 
 from grading import grade_item
-from parse_exercises import init_exercises_db
+from parse_exercises import ensure_exercises, init_exercises_db
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "vocab.db")
@@ -559,4 +559,10 @@ def api_exercises_reset(lesson_id):
 
 
 if __name__ == "__main__":
+    # self-heal on start: parse any lesson that has an Exercises PDF but no data
+    # yet, and load anything not in the DB (new lesson folders "just work")
+    try:
+        ensure_exercises(DB_PATH)
+    except Exception as e:  # never let exercise parsing block the server
+        print(f"[exercises] ensure_exercises skipped: {e}")
     app.run(debug=True, port=5055)
