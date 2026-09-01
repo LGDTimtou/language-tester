@@ -7,7 +7,7 @@ import unicodedata
 from flask import Flask, g, jsonify, render_template, request, abort
 
 from grading import grade_item
-from parse_exercises import ensure_exercises, init_exercises_db
+from parse_exercises import DATA_DIR, ensure_exercises, init_exercises_db, item_key
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "vocab.db")
@@ -556,6 +556,149 @@ def api_exercises_reset(lesson_id):
     )
     db.commit()
     return jsonify({"ok": True})
+
+
+# ---- editing the accepted answers (parsed answers sometimes have small errors) ----
+
+def _answer_editable(grader, spec):
+    """The bits of a graded item's spec the user is allowed to correct."""
+    if grader == "text":
+        return {"blanks": [list(b.get("accept", [])) for b in spec.get("blanks", [])]}
+    if grader == "set":
+        return {"accept_pool": list(spec.get("accept_pool", [])),
+                "n_required": spec.get("n_required", 1)}
+    if grader == "choice":
+        return {"options": list(spec.get("options", [])), "correct": list(spec.get("correct", []))}
+    if grader == "table":
+        return {"rows": [
+            {"given": r.get("given", ""), "given_side": r.get("given_side", "sv"),
+             "accept": list(r.get("accept", []))}
+            for r in spec.get("rows", [])
+        ]}
+    return {}
+
+
+def _clean_list(v):
+    return [s.strip() for s in v if isinstance(s, str) and s.strip()]
+
+
+def _apply_answer_edit(grader, spec, edit):
+    """Return a new spec with the user's corrections merged in (empty edits ignored)."""
+    spec = json.loads(json.dumps(spec))  # deep copy
+    if grader == "text":
+        for i, acc in enumerate(edit.get("blanks", [])):
+            acc = _clean_list(acc)
+            if acc and i < len(spec.get("blanks", [])):
+                spec["blanks"][i]["accept"] = acc
+    elif grader == "set":
+        pool = _clean_list(edit.get("accept_pool", []))
+        if pool:
+            spec["accept_pool"] = pool
+        try:
+            n = int(edit.get("n_required", spec.get("n_required", 1)))
+            spec["n_required"] = max(1, min(n, len(spec.get("accept_pool", [])) or n))
+        except (TypeError, ValueError):
+            pass
+    elif grader == "choice":
+        cor = _clean_list(edit.get("correct", []))
+        if cor:
+            spec["correct"] = cor
+    elif grader == "table":
+        for i, acc in enumerate(edit.get("rows", [])):
+            acc = _clean_list(acc)
+            if acc and i < len(spec.get("rows", [])):
+                spec["rows"][i]["accept"] = acc
+    return spec
+
+
+def _write_answers_to_json(lesson_number, edits_by_key):
+    """Mirror the edits into exercises_data/<n>.json so a reload keeps them.
+    edits_by_key: {item_key: (grader, new_spec)}. Marks an auto file 'edited'."""
+    path = os.path.join(DATA_DIR, f"{lesson_number}.json")
+    if not os.path.exists(path):
+        return False
+    data = json.load(open(path, encoding="utf-8"))
+    changed = False
+    for it in data.get("items", []):
+        if it.get("kind") != "graded":
+            continue
+        key = item_key(it.get("prompt", ""), it.get("section", ""))
+        if key not in edits_by_key:
+            continue
+        grader, spec = edits_by_key[key]
+        it.pop("accept", None)
+        if grader == "text":
+            it["blanks"] = [{"accept": b["accept"]} for b in spec["blanks"]]
+        elif grader == "set":
+            it["accept_pool"] = spec["accept_pool"]
+            it["n_required"] = spec["n_required"]
+        elif grader == "choice":
+            it["correct"] = spec["correct"]
+        elif grader == "table":
+            for i, row in enumerate(spec["rows"]):
+                if i < len(it.get("rows", [])):
+                    it["rows"][i]["accept"] = row["accept"]
+        changed = True
+    if changed:
+        if data.get("source", "auto") == "auto":
+            data["source"] = "edited"
+        json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return changed
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises/answers")
+def api_exercises_answers(lesson_id):
+    """Current accepted answers for every graded item - only fetched when the
+    user opens the answer editor."""
+    db = get_db()
+    if not db.execute("SELECT 1 FROM lessons WHERE id = ?", (lesson_id,)).fetchone():
+        abort(404)
+    out = []
+    for r in _exercise_rows(db, lesson_id):
+        if r["kind"] != "graded":
+            continue
+        spec = json.loads(r["spec_json"] or "{}")
+        out.append({
+            "id": r["id"], "section": r["section"], "prompt": r["prompt"],
+            "grader": r["grader"], "editable": _answer_editable(r["grader"], spec),
+        })
+    return jsonify({"items": out})
+
+
+@app.route("/api/lessons/<int:lesson_id>/exercises/answers", methods=["POST"])
+def api_exercises_answers_save(lesson_id):
+    db = get_db()
+    lesson = db.execute("SELECT number FROM lessons WHERE id = ?", (lesson_id,)).fetchone()
+    if not lesson:
+        abort(404)
+    edits = (request.get_json(force=True) or {}).get("items", {})
+    rows = {str(r["id"]): r for r in _exercise_rows(db, lesson_id)}
+
+    edits_by_key, updated = {}, 0
+    for sid, edit in edits.items():
+        r = rows.get(str(sid))
+        if not r or r["kind"] != "graded":
+            continue
+        old = json.loads(r["spec_json"] or "{}")
+        new = _apply_answer_edit(r["grader"], old, edit or {})
+        if json.dumps(new, sort_keys=True) == json.dumps(old, sort_keys=True):
+            continue
+        db.execute(
+            "UPDATE exercise_items SET spec_json = ?, solved = 0 WHERE id = ?",
+            (json.dumps(new, ensure_ascii=False), r["id"]),
+        )
+        edits_by_key[r["item_key"]] = (r["grader"], new)
+        updated += 1
+    db.commit()
+
+    wrote = False
+    if edits_by_key:
+        try:
+            wrote = _write_answers_to_json(lesson["number"], edits_by_key)
+        except OSError as e:
+            print(f"[exercises] could not update JSON for lesson {lesson['number']}: {e}")
+
+    return jsonify({"ok": True, "updated": updated, "json_updated": wrote})
 
 
 if __name__ == "__main__":

@@ -745,8 +745,10 @@ def cmd_regen(args):
     path = _json_path(n)
     if os.path.exists(path):
         try:
-            if json.load(open(path, encoding="utf-8")).get("source") == "hand":
-                sys.exit(f"{path} is hand-authored (\"source\": \"hand\") - refusing to overwrite")
+            src = json.load(open(path, encoding="utf-8")).get("source")
+            if src in ("hand", "edited"):
+                sys.exit(f"{path} has \"source\": \"{src}\" (manually corrected) - refusing to "
+                         f"overwrite; delete it first if you really want to re-parse")
         except (ValueError, KeyError):
             pass
     folder = _lesson_folders().get(n)
