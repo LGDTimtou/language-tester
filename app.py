@@ -7,7 +7,9 @@ import unicodedata
 from flask import Flask, g, jsonify, render_template, request, abort
 
 from grading import grade_item
-from parse_exercises import DATA_DIR, ensure_exercises, init_exercises_db, item_key
+from parse_exercises import (
+    DATA_DIR, dump_lesson_json, ensure_exercises, init_exercises_db, item_key,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "vocab.db")
@@ -611,39 +613,53 @@ def _apply_answer_edit(grader, spec, edit):
     return spec
 
 
-def _write_answers_to_json(lesson_number, edits_by_key):
-    """Mirror the edits into exercises_data/<n>.json so a reload keeps them.
-    edits_by_key: {item_key: (grader, new_spec)}. Marks an auto file 'edited'."""
-    path = os.path.join(DATA_DIR, f"{lesson_number}.json")
-    if not os.path.exists(path):
-        return False
-    data = json.load(open(path, encoding="utf-8"))
-    changed = False
-    for it in data.get("items", []):
-        if it.get("kind") != "graded":
-            continue
-        key = item_key(it.get("prompt", ""), it.get("section", ""))
-        if key not in edits_by_key:
-            continue
-        grader, spec = edits_by_key[key]
-        it.pop("accept", None)
-        if grader == "text":
-            it["blanks"] = [{"accept": b["accept"]} for b in spec["blanks"]]
-        elif grader == "set":
-            it["accept_pool"] = spec["accept_pool"]
-            it["n_required"] = spec["n_required"]
-        elif grader == "choice":
-            it["correct"] = spec["correct"]
-        elif grader == "table":
-            for i, row in enumerate(spec["rows"]):
-                if i < len(it.get("rows", [])):
-                    it["rows"][i]["accept"] = row["accept"]
-        changed = True
-    if changed:
-        if data.get("source", "auto") == "auto":
-            data["source"] = "edited"
-        json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-    return changed
+def _spec_from_form(grader, form):
+    """Build a fresh grader spec from the inline / bulk editor's fields."""
+    form = form or {}
+    if grader == "text":
+        blanks = [_clean_list(b) for b in form.get("blanks", [])]
+        blanks = [b for b in blanks if b] or [[""]]
+        return {"blanks": [{"accept": b} for b in blanks]}
+    if grader == "set":
+        pool = _clean_list(form.get("accept_pool", []))
+        try:
+            n = int(form.get("n_required", 1))
+        except (TypeError, ValueError):
+            n = 1
+        return {"accept_pool": pool, "n_required": max(1, min(n, len(pool) or n)), "distinct": True}
+    if grader == "choice":
+        return {"options": _clean_list(form.get("options", [])),
+                "correct": _clean_list(form.get("correct", []))}
+    if grader == "table":
+        rows = []
+        for r in form.get("rows", []):
+            acc = _clean_list(r.get("accept", []))
+            given = (r.get("given") or "").strip()
+            if given or acc:
+                rows.append({"given": given,
+                             "given_side": "en" if r.get("given_side") == "en" else "sv",
+                             "accept": acc})
+        return {"rows": rows}
+    return {}
+
+
+def _spec_problem(grader, spec):
+    """Human-readable reason the spec is unusable, or None."""
+    if grader == "text":
+        if not spec["blanks"] or any(not b["accept"] for b in spec["blanks"]):
+            return "every blank needs at least one accepted answer"
+    elif grader == "set":
+        if not spec["accept_pool"]:
+            return "the accepted pool is empty"
+    elif grader == "choice":
+        if not spec["options"] or not spec["correct"]:
+            return "choice needs options and at least one correct value"
+    elif grader == "table":
+        if not any(r["accept"] for r in spec["rows"]):
+            return "at least one table row needs an accepted answer"
+    else:
+        return f"unknown type {grader!r}"
+    return None
 
 
 @app.route("/api/lessons/<int:lesson_id>/exercises/answers")
@@ -674,7 +690,7 @@ def api_exercises_answers_save(lesson_id):
     edits = (request.get_json(force=True) or {}).get("items", {})
     rows = {str(r["id"]): r for r in _exercise_rows(db, lesson_id)}
 
-    edits_by_key, updated = {}, 0
+    updated = 0
     for sid, edit in edits.items():
         r = rows.get(str(sid))
         if not r or r["kind"] != "graded":
@@ -687,18 +703,134 @@ def api_exercises_answers_save(lesson_id):
             "UPDATE exercise_items SET spec_json = ?, solved = 0 WHERE id = ?",
             (json.dumps(new, ensure_ascii=False), r["id"]),
         )
-        edits_by_key[r["item_key"]] = (r["grader"], new)
         updated += 1
     db.commit()
 
     wrote = False
-    if edits_by_key:
+    if updated:
         try:
-            wrote = _write_answers_to_json(lesson["number"], edits_by_key)
+            wrote = dump_lesson_json(db, lesson["number"])
         except OSError as e:
             print(f"[exercises] could not update JSON for lesson {lesson['number']}: {e}")
 
     return jsonify({"ok": True, "updated": updated, "json_updated": wrote})
+
+
+# ---- one item at a time: reveal answer, edit it inline, change its type/heading ----
+
+def _item_detail(r):
+    spec = json.loads(r["spec_json"] or "{}")
+    return {
+        "id": r["id"], "uid": r["uid"], "order_index": r["order_index"],
+        "section": r["section"], "kind": r["kind"], "grader": r["grader"],
+        "prompt": r["prompt"], "solved": bool(r["solved"]),
+        "editable": _answer_editable(r["grader"], spec) if r["kind"] == "graded" else {},
+        "reference": json.loads(r["reference_json"]) if r["reference_json"] else [],
+    }
+
+
+@app.route("/api/exercises/<int:item_id>")
+def api_exercise_get(item_id):
+    db = get_db()
+    r = db.execute("SELECT * FROM exercise_items WHERE id = ?", (item_id,)).fetchone()
+    if not r:
+        abort(404)
+    return jsonify(_item_detail(r))
+
+
+@app.route("/api/exercises/<int:item_id>", methods=["POST"])
+def api_exercise_patch(item_id):
+    """Edit one item: accepted answers, grader type, prompt, and/or its heading.
+    Body: {grader?, form?, prompt?, heading?}. Regenerates the lesson JSON."""
+    db = get_db()
+    r = db.execute("SELECT * FROM exercise_items WHERE id = ?", (item_id,)).fetchone()
+    if not r:
+        abort(404)
+    lesson = db.execute("SELECT number FROM lessons WHERE id = ?", (r["lesson_id"],)).fetchone()
+    body = request.get_json(force=True) or {}
+
+    grader = body.get("grader", r["grader"]) or r["grader"]
+    prompt = body.get("prompt", r["prompt"])
+    if prompt is None or not str(prompt).strip():
+        return jsonify({"error": "prompt can't be empty"}), 400
+    prompt = str(prompt).strip()
+
+    if r["kind"] == "graded":
+        if "form" in body or body.get("grader"):
+            spec = _spec_from_form(grader, body.get("form", {}))
+        else:
+            spec = json.loads(r["spec_json"] or "{}")
+        problem = _spec_problem(grader, spec)
+        if problem:
+            return jsonify({"error": problem}), 400
+        db.execute(
+            "UPDATE exercise_items SET grader = ?, prompt = ?, spec_json = ?, "
+            "item_key = ?, solved = 0 WHERE id = ?",
+            (grader, prompt, json.dumps(spec, ensure_ascii=False),
+             item_key(prompt, r["section"] or ""), item_id),
+        )
+    else:  # open item: only the prompt / reference are editable here
+        ref = body.get("reference", None)
+        db.execute(
+            "UPDATE exercise_items SET prompt = ?, item_key = ?, reference_json = ? WHERE id = ?",
+            (prompt, item_key(prompt, r["section"] or ""),
+             json.dumps(ref, ensure_ascii=False) if ref is not None else r["reference_json"],
+             item_id),
+        )
+
+    if "heading" in body:
+        _set_heading_run(db, r["lesson_id"], r["order_index"], (body["heading"] or "").strip() or None)
+
+    db.commit()
+    wrote = False
+    try:
+        wrote = dump_lesson_json(db, lesson["number"])
+    except OSError as e:
+        print(f"[exercises] JSON write failed for lesson {lesson['number']}: {e}")
+
+    fresh = db.execute("SELECT * FROM exercise_items WHERE id = ?", (item_id,)).fetchone()
+    return jsonify({"ok": True, "json_updated": wrote, "item": _item_detail(fresh)})
+
+
+def _set_heading_run(db, lesson_id, order_index, new_section):
+    """Rename the heading of the contiguous section-run that contains the item at
+    order_index. If that item starts the run it's a plain rename; if it's in the
+    middle the run is split there (that item + the ones after it get new_section)."""
+    rows = db.execute(
+        "SELECT id, order_index, section FROM exercise_items WHERE lesson_id = ? "
+        "ORDER BY order_index, id", (lesson_id,),
+    ).fetchall()
+    idx = next((i for i, x in enumerate(rows) if x["order_index"] == order_index), None)
+    if idx is None:
+        return
+    target = rows[idx]["section"]
+    end = idx
+    while end + 1 < len(rows) and rows[end + 1]["section"] == target:
+        end += 1
+    for x in rows[idx:end + 1]:
+        db.execute(
+            "UPDATE exercise_items SET section = ?, item_key = ? WHERE id = ?",
+            (new_section, item_key(
+                db.execute("SELECT prompt FROM exercise_items WHERE id = ?", (x["id"],)).fetchone()[0],
+                new_section or ""), x["id"]),
+        )
+
+
+@app.route("/api/exercises/<int:item_id>/heading", methods=["POST"])
+def api_exercise_heading(item_id):
+    db = get_db()
+    r = db.execute("SELECT * FROM exercise_items WHERE id = ?", (item_id,)).fetchone()
+    if not r:
+        abort(404)
+    lesson = db.execute("SELECT number FROM lessons WHERE id = ?", (r["lesson_id"],)).fetchone()
+    title = ((request.get_json(force=True) or {}).get("title") or "").strip() or None
+    _set_heading_run(db, r["lesson_id"], r["order_index"], title)
+    db.commit()
+    try:
+        dump_lesson_json(db, lesson["number"])
+    except OSError:
+        pass
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

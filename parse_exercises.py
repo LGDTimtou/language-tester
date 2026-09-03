@@ -50,6 +50,7 @@ def init_exercises_db(conn):
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         lesson_id        INTEGER NOT NULL REFERENCES lessons(id),
         item_key         TEXT NOT NULL,
+        uid              TEXT,
         order_index      INTEGER NOT NULL,
         section          TEXT,
         kind             TEXT NOT NULL,
@@ -63,7 +64,18 @@ def init_exercises_db(conn):
         UNIQUE(lesson_id, item_key)
     );
     """)
+    # migrate older DBs: add uid, backfill with a random 12-hex per row. uid is
+    # the stable identity used to round-trip structural edits (prompt / type /
+    # heading changes) through exercises_data/<n>.json.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(exercise_items)")]
+    if "uid" not in cols:
+        conn.execute("ALTER TABLE exercise_items ADD COLUMN uid TEXT")
+    conn.execute("UPDATE exercise_items SET uid = lower(hex(randomblob(6))) WHERE uid IS NULL OR uid = ''")
     conn.commit()
+
+
+def new_uid():
+    return hashlib.sha1(os.urandom(16)).hexdigest()[:12]
 
 
 def item_key(prompt, section):
@@ -144,7 +156,7 @@ def load_file(conn, path):
     if lesson_id is None:
         raise ValueError(f"lesson {lesson_no} not in DB (run parse_vocab.py first)")
 
-    fresh_keys = set()
+    fresh_uids, fresh_keys = set(), set()
     n_graded = n_open = new_rows = 0
     for order_index, it in enumerate(items):
         kind = it["kind"]
@@ -152,38 +164,53 @@ def load_file(conn, path):
         spec = _build_spec(it) if kind == "graded" else {}
         reference = it.get("reference")
         key = item_key(it["prompt"], it.get("section", ""))
+        uid = it.get("uid") or ""
         fresh_keys.add(key)
         n_graded += kind == "graded"
         n_open += kind == "open"
 
-        existing = conn.execute(
-            "SELECT id FROM exercise_items WHERE lesson_id = ? AND item_key = ?",
-            (lesson_id, key),
-        ).fetchone()
+        # match by uid first (survives prompt / section / type edits), then fall
+        # back to the prompt hash for files authored before uids existed
+        existing = None
+        if uid:
+            existing = conn.execute(
+                "SELECT id, uid FROM exercise_items WHERE lesson_id = ? AND uid = ?",
+                (lesson_id, uid),
+            ).fetchone()
+        if existing is None:
+            existing = conn.execute(
+                "SELECT id, uid FROM exercise_items WHERE lesson_id = ? AND item_key = ?",
+                (lesson_id, key),
+            ).fetchone()
+        if not uid:
+            # keep the row's existing uid if it has one, else mint a fresh one
+            uid = (existing[1] if existing and existing[1] else new_uid())
+        fresh_uids.add(uid)
+
         ref_json = json.dumps(reference, ensure_ascii=False) if reference is not None else None
         if existing:
             conn.execute(
-                "UPDATE exercise_items SET order_index = ?, section = ?, kind = ?, grader = ?, "
-                "prompt = ?, spec_json = ?, reference_json = ? WHERE id = ?",
-                (order_index, it.get("section"), kind, grader, it["prompt"],
+                "UPDATE exercise_items SET item_key = ?, uid = ?, order_index = ?, section = ?, "
+                "kind = ?, grader = ?, prompt = ?, spec_json = ?, reference_json = ? WHERE id = ?",
+                (key, uid, order_index, it.get("section"), kind, grader, it["prompt"],
                  json.dumps(spec, ensure_ascii=False), ref_json, existing[0]),
             )
         else:
             new_rows += 1
             conn.execute(
-                "INSERT INTO exercise_items (lesson_id, item_key, order_index, section, kind, "
-                "grader, prompt, spec_json, reference_json) VALUES (?,?,?,?,?,?,?,?,?)",
-                (lesson_id, key, order_index, it.get("section"), kind, grader, it["prompt"],
+                "INSERT INTO exercise_items (lesson_id, item_key, uid, order_index, section, kind, "
+                "grader, prompt, spec_json, reference_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (lesson_id, key, uid, order_index, it.get("section"), kind, grader, it["prompt"],
                  json.dumps(spec, ensure_ascii=False), ref_json),
             )
 
     stale = conn.execute(
-        "SELECT id, item_key, solved, self_done FROM exercise_items WHERE lesson_id = ?",
+        "SELECT id, item_key, uid, solved, self_done FROM exercise_items WHERE lesson_id = ?",
         (lesson_id,),
     ).fetchall()
     kept = 0
-    for row_id, key, solved, self_done in stale:
-        if key in fresh_keys:
+    for row_id, key, uid, solved, self_done in stale:
+        if (uid and uid in fresh_uids) or key in fresh_keys:
             continue
         if solved or self_done:
             kept += 1
@@ -194,6 +221,65 @@ def load_file(conn, path):
     src = data.get("source", "auto")
     tail = f"  ({kept} kept w/ progress)" if kept else ""
     return f"{lesson_no:>3}. [{src:<4}] graded={n_graded:<3} open={n_open:<3} new={new_rows}{tail}"
+
+
+def _item_from_row(row):
+    """DB row -> the JSON item shape that load_file() reads back."""
+    it = {"uid": row["uid"], "section": row["section"], "kind": row["kind"],
+          "prompt": row["prompt"]}
+    if row["kind"] == "graded":
+        it["grader"] = row["grader"]
+        spec = json.loads(row["spec_json"] or "{}")
+        if row["grader"] == "text":
+            it["blanks"] = [{"accept": list(b.get("accept", []))} for b in spec.get("blanks", [])]
+        elif row["grader"] == "set":
+            it["accept_pool"] = list(spec.get("accept_pool", []))
+            it["n_required"] = spec.get("n_required", len(it["accept_pool"]))
+            it["distinct"] = spec.get("distinct", True)
+        elif row["grader"] == "choice":
+            it["options"] = list(spec.get("options", []))
+            it["correct"] = list(spec.get("correct", []))
+        elif row["grader"] == "table":
+            it["rows"] = [
+                {"given": r.get("given", ""), "given_side": r.get("given_side", "sv"),
+                 "accept": list(r.get("accept", []))}
+                for r in spec.get("rows", [])
+            ]
+    else:
+        it["reference"] = json.loads(row["reference_json"]) if row["reference_json"] else None
+    return it
+
+
+def dump_lesson_json(conn, lesson_number):
+    """Rewrite exercises_data/<n>.json from the current DB rows (used after an
+    in-app structural edit). Keeps 'hand' as 'hand', promotes 'auto' to 'edited'."""
+    lesson_id = _lesson_id(conn, lesson_number)
+    if lesson_id is None:
+        return False
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM exercise_items WHERE lesson_id = ? ORDER BY order_index, id", (lesson_id,)
+    ).fetchall()
+
+    path = _json_path(lesson_number)
+    meta = {}
+    if os.path.exists(path):
+        try:
+            meta = json.load(open(path, encoding="utf-8"))
+        except (ValueError, OSError):
+            meta = {}
+    source = meta.get("source", "auto")
+    if source != "hand":
+        source = "edited"
+
+    out = {"lesson": lesson_number, "source": source}
+    if meta.get("source_pdf"):
+        out["source_pdf"] = meta["source_pdf"]
+    out["items"] = [_item_from_row(r) for r in rows]
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    json.dump(out, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return True
 
 
 # ---------- PDF discovery ----------
