@@ -765,24 +765,28 @@ def api_exercise_get(item_id):
 
 @app.route("/api/exercises/<int:item_id>", methods=["POST"])
 def api_exercise_patch(item_id):
-    """Edit one item: accepted answers, grader type, prompt, and/or its heading.
-    Body: {grader?, form?, prompt?, heading?}. Regenerates the lesson JSON."""
+    """Edit one item: type (incl. graded <-> open), accepted answers / reference,
+    prompt, and/or its heading. Body: {grader?, form?, prompt?, heading?}.
+    grader == "open" makes it a self-check item. Regenerates the lesson JSON."""
     db = get_db()
     r = db.execute("SELECT * FROM exercise_items WHERE id = ?", (item_id,)).fetchone()
     if not r:
         abort(404)
     lesson = db.execute("SELECT number FROM lessons WHERE id = ?", (r["lesson_id"],)).fetchone()
     body = request.get_json(force=True) or {}
+    form = body.get("form", {}) or {}
 
-    grader = body.get("grader", r["grader"]) or r["grader"]
+    req = body.get("grader")
+    new_kind = "open" if req == "open" else "graded"
     prompt = body.get("prompt", r["prompt"])
     if prompt is None or not str(prompt).strip():
         return jsonify({"error": "prompt can't be empty"}), 400
     prompt = str(prompt).strip()
 
-    if r["kind"] == "graded":
-        if "form" in body or body.get("grader"):
-            spec = _spec_from_form(grader, body.get("form", {}))
+    if new_kind == "graded":
+        grader = req or (r["grader"] if r["kind"] == "graded" else "translate")
+        if "form" in body or req:
+            spec = _spec_from_form(grader, form)
         else:
             spec = json.loads(r["spec_json"] or "{}")
         # a fill item's sentence IS its prompt - keep the two in sync
@@ -792,18 +796,23 @@ def api_exercise_patch(item_id):
         if problem:
             return jsonify({"error": problem}), 400
         db.execute(
-            "UPDATE exercise_items SET grader = ?, prompt = ?, spec_json = ?, "
-            "item_key = ?, solved = 0 WHERE id = ?",
+            "UPDATE exercise_items SET kind = 'graded', grader = ?, prompt = ?, spec_json = ?, "
+            "reference_json = NULL, item_key = ?, solved = 0, self_done = 0 WHERE id = ?",
             (grader, prompt, json.dumps(spec, ensure_ascii=False),
              item_key(prompt, r["section"] or ""), item_id),
         )
-    else:  # open item: only the prompt / reference are editable here
-        ref = body.get("reference", None)
+    else:  # open / self-check item
+        ref = form.get("reference", body.get("reference"))
+        if isinstance(ref, list):
+            ref_list = _clean_list(ref)
+        else:
+            ref_list = json.loads(r["reference_json"]) if r["reference_json"] else []
+        keep_done = r["self_done"] if r["kind"] == "open" else 0
         db.execute(
-            "UPDATE exercise_items SET prompt = ?, item_key = ?, reference_json = ? WHERE id = ?",
-            (prompt, item_key(prompt, r["section"] or ""),
-             json.dumps(ref, ensure_ascii=False) if ref is not None else r["reference_json"],
-             item_id),
+            "UPDATE exercise_items SET kind = 'open', grader = NULL, prompt = ?, spec_json = '{}', "
+            "reference_json = ?, item_key = ?, solved = 0, self_done = ? WHERE id = ?",
+            (prompt, json.dumps(ref_list, ensure_ascii=False) if ref_list else None,
+             item_key(prompt, r["section"] or ""), keep_done, item_id),
         )
 
     if "heading" in body:
