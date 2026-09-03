@@ -1,10 +1,10 @@
-"""One-off / re-runnable importer: extracts vocabulary word pairs and verb
-tense tables from each lesson's Vocabulary PDF and loads them into vocab.db.
+"""One-off importer: extracts vocabulary word pairs and verb tense tables from
+each lesson's Vocabulary PDF and loads them into the progress DB.
 
-Safe to re-run: existing words (matched by lesson+swedish+tense) keep their
-correct/wrong/known progress; only new words are inserted, and words that
-disappeared from the source PDF are left untouched (never deleted), so
-re-parsing never destroys quiz history.
+A lesson's PDF is parsed exactly ONCE - a lesson that already has words is
+skipped on every later run (pass --force to re-parse anyway). Existing words
+keep their correct/wrong/known progress; only new words are inserted, and words
+that disappeared from the source PDF are left untouched.
 """
 import os
 import re
@@ -13,8 +13,17 @@ import subprocess
 import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOADS_DIR = os.path.join(os.path.dirname(BASE_DIR), "PatreonDownloads")
-DB_PATH = os.path.join(BASE_DIR, "vocab.db")
+DOWNLOADS_DIR = os.environ.get(
+    "LSWK_DOWNLOADS_DIR", os.path.join(os.path.dirname(BASE_DIR), "PatreonDownloads")
+)
+
+# keep the DB out of any cloud-synced folder (see parse_exercises.resolve_db_path)
+_HOME_DB = os.path.join(
+    os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+    "lswk-trainer", "vocab.db",
+)
+DB_PATH = (os.environ.get("LSWK_DB")
+           or (_HOME_DB if os.path.exists(_HOME_DB) else os.path.join(BASE_DIR, "vocab.db")))
 
 TENSE_KEYWORDS = [
     ("presens particip", "Presens particip"),
@@ -359,7 +368,17 @@ def upsert_word(conn, lesson_id, swedish, english, tense, verb_group, order_inde
     return 1
 
 
+def _already_imported(conn, folder):
+    """True if this lesson folder is in the DB with at least one word."""
+    row = conn.execute(
+        "SELECT 1 FROM lessons l JOIN words w ON w.lesson_id = l.id "
+        "WHERE l.folder = ? LIMIT 1", (folder,),
+    ).fetchone()
+    return row is not None
+
+
 def main():
+    force = "--force" in sys.argv[1:]
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
@@ -370,7 +389,11 @@ def main():
 
     report = []
     total_new = 0
+    skipped = 0
     for folder in folders:
+        if not force and _already_imported(conn, folder):
+            skipped += 1
+            continue
         data = parse_lesson_folder(folder)
         if data is None:
             continue
@@ -409,7 +432,10 @@ def main():
     conn.close()
 
     print("\n".join(report))
-    print(f"\nTotal new word rows inserted: {total_new}")
+    if skipped:
+        print(f"\nSkipped {skipped} already-imported lesson(s) (use --force to re-parse).")
+    print(f"Total new word rows inserted: {total_new}")
+    print(f"DB: {DB_PATH}")
 
 
 if __name__ == "__main__":

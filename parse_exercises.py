@@ -37,7 +37,26 @@ DATA_DIR = os.path.join(BASE_DIR, "exercises_data")
 DOWNLOADS_DIR = os.environ.get(
     "LSWK_DOWNLOADS_DIR", os.path.join(os.path.dirname(BASE_DIR), "PatreonDownloads")
 )
-DB_PATH = os.environ.get("LSWK_DB", os.path.join(BASE_DIR, "vocab.db"))
+
+# The progress DB should NOT live in a cloud-synced folder (Dropbox etc.) - a
+# sync can silently roll a live SQLite file back and wipe progress. Preferred
+# home is outside the repo; a legacy ./vocab.db is still honoured if that's all
+# there is. `run.sh` migrates an existing ./vocab.db to the home path once.
+_HOME_DB = os.path.join(
+    os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+    "lswk-trainer", "vocab.db",
+)
+
+
+def resolve_db_path():
+    if os.environ.get("LSWK_DB"):
+        return os.environ["LSWK_DB"]
+    if os.path.exists(_HOME_DB):
+        return _HOME_DB
+    return os.path.join(BASE_DIR, "vocab.db")
+
+
+DB_PATH = resolve_db_path()
 
 VALID_GRADERS = {"translate", "fill", "text", "set", "choice", "table"}
 
@@ -835,26 +854,42 @@ def _json_path(n):
 
 
 def ensure_exercises(db_path=None, verbose=True):
-    """App-start hook: auto-parse lessons that have a PDF but no JSON, then load
-    any lesson whose JSON isn't in the DB yet. Cheap once everything is parsed."""
+    """App-start hook. A lesson's Exercises PDF is parsed exactly ONCE, ever:
+    only when it has neither an exercises_data/<n>.json nor rows in the DB.
+
+      * json present            -> leave everything alone
+      * no json but DB has rows -> rebuild the json from the DB (no re-parse,
+                                   so in-app edits/progress are never lost)
+      * no json, no rows        -> parse the PDF (the one and only time)
+
+    Then load any json whose lesson still has no rows (fresh install / new
+    lesson). Existing rows are never re-loaded.
+    """
     conn = sqlite3.connect(db_path or DB_PATH)
     try:
         init_exercises_db(conn)
         os.makedirs(DATA_DIR, exist_ok=True)
-        folders = _lesson_folders()
-        made = []
-        for n, folder in folders.items():
+        parsed, rebuilt = [], []
+        for n, folder in _lesson_folders().items():
             if os.path.exists(_json_path(n)) or not _exercises_pdf(folder):
                 continue
-            if _lesson_id(conn, n) is None:
-                continue  # lesson row not created yet (parse_vocab.py hasn't seen it)
+            lid = _lesson_id(conn, n)
+            if lid is None:
+                continue  # parse_vocab.py hasn't created the lesson row yet
+            if conn.execute("SELECT 1 FROM exercise_items WHERE lesson_id = ? LIMIT 1",
+                            (lid,)).fetchone():
+                dump_lesson_json(conn, n)      # reconstruct, don't re-parse
+                rebuilt.append(n)
+                continue
             data = autoparse_lesson(n, folder)
             if data and data["items"]:
                 json.dump(data, open(_json_path(n), "w", encoding="utf-8"),
                           ensure_ascii=False, indent=2)
-                made.append(n)
-        if made and verbose:
-            print(f"[exercises] auto-parsed new lesson(s): {', '.join(map(str, sorted(made)))}")
+                parsed.append(n)
+        if verbose and parsed:
+            print(f"[exercises] first-time parse of lesson(s): {', '.join(map(str, sorted(parsed)))}")
+        if verbose and rebuilt:
+            print(f"[exercises] rebuilt missing json from the DB for: {', '.join(map(str, sorted(rebuilt)))}")
 
         loaded = []
         for f in sorted(os.listdir(DATA_DIR)) if os.path.isdir(DATA_DIR) else []:
@@ -867,18 +902,19 @@ def ensure_exercises(db_path=None, verbose=True):
             lid = _lesson_id(conn, n)
             if lid is None:
                 continue
-            has_rows = conn.execute(
-                "SELECT 1 FROM exercise_items WHERE lesson_id = ? LIMIT 1", (lid,)
-            ).fetchone()
-            if not has_rows:
-                try:
-                    load_file(conn, os.path.join(DATA_DIR, f))
-                    loaded.append(n)
-                except (ValueError, KeyError, json.JSONDecodeError) as e:
-                    if verbose:
-                        print(f"[exercises] skip {f}: {e}")
-        if loaded and verbose:
-            print(f"[exercises] loaded lesson(s): {', '.join(map(str, sorted(loaded)))}")
+            if conn.execute("SELECT 1 FROM exercise_items WHERE lesson_id = ? LIMIT 1",
+                            (lid,)).fetchone():
+                continue                       # already loaded - never re-load over progress
+            try:
+                load_file(conn, os.path.join(DATA_DIR, f))
+                loaded.append(n)
+            except (ValueError, KeyError, json.JSONDecodeError) as e:
+                if verbose:
+                    print(f"[exercises] skip {f}: {e}")
+        if verbose and loaded:
+            print(f"[exercises] loaded lesson(s) into a fresh DB: {', '.join(map(str, sorted(loaded)))}")
+        if verbose and not (parsed or rebuilt or loaded):
+            print("[exercises] all lessons already have data - nothing to do")
     finally:
         conn.close()
 
@@ -962,6 +998,39 @@ def cmd_status(_args):
     print(f"\n{n_json} / {n_pdf} lessons with an Exercises PDF have exercise data")
 
 
+def _parse_lesson_range(spec):
+    """'1-6', '1,2,5', '1-6,10' -> sorted list of ints."""
+    out = set()
+    for part in str(spec).replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return sorted(out)
+
+
+def cmd_complete(args):
+    nums = _parse_lesson_range(args.lessons)
+    conn = sqlite3.connect(DB_PATH)
+    init_exercises_db(conn)
+    for n in nums:
+        lid = _lesson_id(conn, n)
+        if lid is None:
+            print(f"  lesson {n}: not in DB, skipped")
+            continue
+        cur = conn.execute(
+            "UPDATE exercise_items SET solved = 1, self_done = 1 WHERE lesson_id = ?", (lid,)
+        )
+        conn.execute("UPDATE lessons SET best_score = 100 WHERE id = ?", (lid,))
+        print(f"  lesson {n}: {cur.rowcount} exercise items marked done, best_score = 100")
+    conn.commit()
+    conn.close()
+    print(f"DB: {DB_PATH}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -970,8 +1039,11 @@ def main():
     sub.add_parser("status")
     rg = sub.add_parser("regen")
     rg.add_argument("lesson", type=int)
+    cp = sub.add_parser("complete")
+    cp.add_argument("lessons", help="lesson numbers, e.g. 1-6 or 1,2,5")
 
-    argv = [a[2:] if a in ("--load", "--status", "--regen") else a for a in sys.argv[1:]]
+    known = ("--load", "--status", "--regen", "--complete")
+    argv = [a[2:] if a in known else a for a in sys.argv[1:]]
     args = ap.parse_args(argv)
 
     if args.cmd == "load":
@@ -980,6 +1052,8 @@ def main():
         cmd_status(args)
     elif args.cmd == "regen":
         cmd_regen(args)
+    elif args.cmd == "complete":
+        cmd_complete(args)
     else:
         ensure_exercises()
 

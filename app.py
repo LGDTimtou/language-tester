@@ -9,10 +9,11 @@ from flask import Flask, g, jsonify, render_template, request, abort
 from grading import grade_item
 from parse_exercises import (
     DATA_DIR, dump_lesson_json, ensure_exercises, init_exercises_db, item_key,
+    resolve_db_path,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "vocab.db")
+DB_PATH = resolve_db_path()
 
 app = Flask(__name__)
 
