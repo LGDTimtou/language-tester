@@ -121,6 +121,22 @@ def grade_set(spec, answer):
     return matched >= n_required
 
 
+def grade_translate(spec, answer):
+    """spec: {"accept": [...], "article_optional": bool?}
+    answer: a single string (or 1-element list). Matches any accepted answer.
+    """
+    if isinstance(answer, list):
+        answer = answer[0] if answer else ""
+    if not answer or not answer.strip():
+        return False
+    return _blank_ok(spec.get("accept", []), answer, spec.get("article_optional", True))
+
+
+# a fill-in-the-blanks item grades exactly like the old multi-blank "text": one
+# accepted list per placeholder, answers aligned to {0}, {1}, ... in order
+grade_fill = grade_text
+
+
 def grade_choice(spec, answer):
     """spec: {"options": [...], "correct": [...]}  (correct may hold >1 value,
     e.g. when either the letter or the word is acceptable / multiple right).
@@ -164,7 +180,9 @@ def grade_table(spec, answer):
 
 
 _GRADERS = {
-    "text": grade_text,
+    "translate": grade_translate,
+    "fill": grade_fill,
+    "text": grade_text,          # legacy alias for pre-split data
     "set": grade_set,
     "choice": grade_choice,
     "table": grade_table,

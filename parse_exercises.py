@@ -39,7 +39,7 @@ DOWNLOADS_DIR = os.environ.get(
 )
 DB_PATH = os.environ.get("LSWK_DB", os.path.join(BASE_DIR, "vocab.db"))
 
-VALID_GRADERS = {"text", "set", "choice", "table"}
+VALID_GRADERS = {"translate", "fill", "text", "set", "choice", "table"}
 
 
 # ---------- schema ----------
@@ -71,6 +71,22 @@ def init_exercises_db(conn):
     if "uid" not in cols:
         conn.execute("ALTER TABLE exercise_items ADD COLUMN uid TEXT")
     conn.execute("UPDATE exercise_items SET uid = lower(hex(randomblob(6))) WHERE uid IS NULL OR uid = ''")
+
+    # the old 'text' grader did both translating and fill-in-the-blanks; split
+    # each existing row into 'translate' or 'fill' (template with {0},{1},...)
+    legacy = conn.execute(
+        "SELECT id, prompt, spec_json FROM exercise_items WHERE grader = 'text'"
+    ).fetchall()
+    for row_id, prompt, spec_json in legacy:
+        spec = json.loads(spec_json or "{}")
+        grader, new_prompt, extra = upgrade_legacy_item(
+            {"grader": "text", "prompt": prompt, "blanks": spec.get("blanks")}
+        )
+        new_spec = _build_spec({"grader": grader, "prompt": new_prompt, **extra})
+        conn.execute(
+            "UPDATE exercise_items SET grader = ?, prompt = ?, spec_json = ? WHERE id = ?",
+            (grader, new_prompt, json.dumps(new_spec, ensure_ascii=False), row_id),
+        )
     conn.commit()
 
 
@@ -83,17 +99,68 @@ def item_key(prompt, section):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
+_PLACEHOLDER_RE = re.compile(r"\{(\d+)\}")
+
+
+def fill_placeholder_nums(template):
+    """Distinct {N} numbers in a fill template, in first-appearance order."""
+    seen = []
+    for m in _PLACEHOLDER_RE.finditer(template or ""):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def blanks_to_template(prompt):
+    """'Jag ____ glad ____' -> ('Jag {0} glad {1}', 2)."""
+    n = [0]
+    def repl(_m):
+        i = n[0]
+        n[0] += 1
+        return "{%d}" % i
+    return re.sub(r"_{2,}", repl, prompt), n[0]
+
+
+def upgrade_legacy_item(item):
+    """The old 'text' grader did both jobs. Split it:
+      - a prompt with ____ blanks  -> 'fill'  (template with {0},{1},...)
+      - a prompt with no blanks    -> 'translate'
+    Returns (grader, prompt, spec_fields_dict). Non-'text' items pass through.
+    """
+    if item.get("grader") != "text":
+        return item.get("grader"), item.get("prompt", ""), {}
+    prompt = item.get("prompt", "")
+    blanks = item.get("blanks") or [{"accept": list(item.get("accept", []))}]
+    if re.search(r"_{2,}", prompt):
+        template, k = blanks_to_template(prompt)
+        while len(blanks) < k:
+            blanks.append({"accept": []})
+        return "fill", template, {"template": template, "blanks": blanks[:k] if k else blanks}
+    acc = []
+    for b in blanks:
+        acc += list(b.get("accept", []))
+    return "translate", prompt, {"accept": acc}
+
+
 # ---------- authored JSON -> DB ----------
 
 def _build_spec(item):
     grader = item.get("grader")
-    if grader == "text":
-        blanks = item.get("blanks") or [{"accept": item.get("accept", [])}]
-        return {"blanks": [
-            {"accept": list(b.get("accept", [])),
-             **({"article_optional": b["article_optional"]} if "article_optional" in b else {})}
-            for b in blanks
-        ]}
+    if grader == "translate":
+        return {"accept": list(item.get("accept", [])),
+                **({"article_optional": item["article_optional"]} if "article_optional" in item else {})}
+    if grader in ("fill", "text"):
+        template = item.get("template") or item.get("prompt", "")
+        blanks = item.get("blanks") or [{"accept": list(item.get("accept", []))}]
+        return {
+            "template": template,
+            "blanks": [
+                {"accept": list(b.get("accept", [])),
+                 **({"article_optional": b["article_optional"]} if "article_optional" in b else {})}
+                for b in blanks
+            ],
+        }
     if grader == "set":
         return {
             "n_required": item.get("n_required", len(item.get("accept_pool", []))),
@@ -127,8 +194,11 @@ def _validate(lesson_no, items):
                 problems.append(f"{where}: grader must be one of {sorted(VALID_GRADERS)}")
                 continue
             spec = _build_spec(it)
-            if g == "text" and (not spec["blanks"] or any(not b["accept"] for b in spec["blanks"])):
-                problems.append(f"{where}: text grader needs a non-empty accept list per blank")
+            if g == "translate" and not [a for a in spec.get("accept", []) if a and a.strip()]:
+                problems.append(f"{where}: translate grader needs at least one accepted answer")
+            if g in ("fill", "text") and (
+                not spec["blanks"] or any(not b["accept"] for b in spec["blanks"])):
+                problems.append(f"{where}: fill grader needs a non-empty accept list per blank")
             if g == "set" and (not spec["accept_pool"] or spec["n_required"] < 1):
                 problems.append(f"{where}: set grader needs accept_pool and n_required >= 1")
             if g == "choice" and (not spec["options"] or not spec["correct"]):
@@ -160,10 +230,13 @@ def load_file(conn, path):
     n_graded = n_open = new_rows = 0
     for order_index, it in enumerate(items):
         kind = it["kind"]
-        grader = it.get("grader") if kind == "graded" else None
-        spec = _build_spec(it) if kind == "graded" else {}
+        if kind == "graded":
+            grader, prompt, extra = upgrade_legacy_item(it)
+            spec = _build_spec({**it, "grader": grader, "prompt": prompt, **extra})
+        else:
+            grader, prompt, spec = None, it["prompt"], {}
         reference = it.get("reference")
-        key = item_key(it["prompt"], it.get("section", ""))
+        key = item_key(prompt, it.get("section", ""))
         uid = it.get("uid") or ""
         fresh_keys.add(key)
         n_graded += kind == "graded"
@@ -192,7 +265,7 @@ def load_file(conn, path):
             conn.execute(
                 "UPDATE exercise_items SET item_key = ?, uid = ?, order_index = ?, section = ?, "
                 "kind = ?, grader = ?, prompt = ?, spec_json = ?, reference_json = ? WHERE id = ?",
-                (key, uid, order_index, it.get("section"), kind, grader, it["prompt"],
+                (key, uid, order_index, it.get("section"), kind, grader, prompt,
                  json.dumps(spec, ensure_ascii=False), ref_json, existing[0]),
             )
         else:
@@ -200,7 +273,7 @@ def load_file(conn, path):
             conn.execute(
                 "INSERT INTO exercise_items (lesson_id, item_key, uid, order_index, section, kind, "
                 "grader, prompt, spec_json, reference_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (lesson_id, key, uid, order_index, it.get("section"), kind, grader, it["prompt"],
+                (lesson_id, key, uid, order_index, it.get("section"), kind, grader, prompt,
                  json.dumps(spec, ensure_ascii=False), ref_json),
             )
 
@@ -230,7 +303,11 @@ def _item_from_row(row):
     if row["kind"] == "graded":
         it["grader"] = row["grader"]
         spec = json.loads(row["spec_json"] or "{}")
-        if row["grader"] == "text":
+        if row["grader"] == "translate":
+            it["accept"] = list(spec.get("accept", []))
+        elif row["grader"] in ("fill", "text"):
+            it["grader"] = "fill"
+            it["template"] = spec.get("template", row["prompt"])
             it["blanks"] = [{"accept": list(b.get("accept", []))} for b in spec.get("blanks", [])]
         elif row["grader"] == "set":
             it["accept_pool"] = list(spec.get("accept_pool", []))
@@ -724,8 +801,8 @@ def _parse_pairs_and_blanks(header, body, sol_pairs, sol_sentences, sol_body_lin
             lhs = pr[0].strip()
             rhs = sol_pairs.get(normalize(lhs))
             if rhs:
-                out.append(_mk_item(header, "graded", lhs, grader="text",
-                                    blanks=[{"accept": _accepts(rhs)}]))
+                out.append(_mk_item(header, "graded", lhs, grader="translate",
+                                    accept=_accepts(rhs)))
             else:
                 out.append(_mk_item(header, "open", lhs, reference=None))
             continue
@@ -739,8 +816,10 @@ def _parse_pairs_and_blanks(header, body, sol_pairs, sol_sentences, sol_body_lin
             prompt = _NUM_PREFIX_RE.sub("", s).strip()
             vals = _diff_blanks(prompt, sol) if sol else None
             if vals:
-                out.append(_mk_item(header, "graded", _BLANK_RE.sub("____", prompt),
-                                    grader="text", blanks=[{"accept": _accepts(v)} for v in vals]))
+                template, _k = blanks_to_template(_BLANK_RE.sub("____", prompt))
+                out.append(_mk_item(header, "graded", template, grader="fill",
+                                    template=template,
+                                    blanks=[{"accept": _accepts(v)} for v in vals]))
             elif sol:
                 out.append(_mk_item(header, "open", _BLANK_RE.sub("____", prompt),
                                     reference=[sol.strip()]))

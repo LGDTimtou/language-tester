@@ -63,7 +63,14 @@ const CROSS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const EYE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
 const EYE_OFF_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
 const PENCIL_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>`;
-const GRADER_LABELS = {text: 'Fill in / translate', set: 'Write several (set)', choice: 'Multiple choice', table: 'Vocabulary table'};
+const GRADER_LABELS = {translate: 'Translate', fill: 'Fill in the blanks', set: 'Write several (set)', choice: 'Multiple choice', table: 'Vocabulary table'};
+const PLACEHOLDER_RE = /\{(\d+)\}/g;
+function templateNums(t) {
+    const s = []; let m;
+    PLACEHOLDER_RE.lastIndex = 0;
+    while ((m = PLACEHOLDER_RE.exec(t || '')) !== null) { const n = +m[1]; if (!s.includes(n)) s.push(n); }
+    return s;
+}
 
 let items = [];
 let checkedOnce = false;
@@ -88,32 +95,44 @@ function inputEl(cls, value) {
     return i;
 }
 
-function renderTextBody(container, it) {
-    const prompt = it.prompt || '';
-    const nBlanks = (it.render && it.render.n_blanks) || 1;
-    const segs = prompt.split(/_{2,}/);
+function renderTranslateBody(container, it) {
+    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
     const wrap = document.createElement('div');
     wrap.className = 'ex-prompt';
-    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
+    wrap.appendChild(document.createTextNode((it.prompt || '') + ' '));
+    wrap.appendChild(inputEl('ex-input ex-blank', last[0] || ''));
+    container.appendChild(wrap);
+}
 
-    if (segs.length > 1) {
-        segs.forEach((seg, idx) => {
-            if (seg) wrap.appendChild(document.createTextNode(seg));
-            if (idx < segs.length - 1) {
-                wrap.appendChild(inputEl('ex-input ex-blank', last[idx] || ''));
+function renderFillBody(container, it) {
+    const template = (it.render && it.render.template) || it.prompt || '';
+    const last = (it.last_answer && Array.isArray(it.last_answer)) ? it.last_answer : [];
+    const wrap = document.createElement('div');
+    wrap.className = 'ex-prompt';
+    // split keeps the captured number: ["Jag ", "0", " Katrin ", "1", ""]
+    const parts = template.split(/\{(\d+)\}/);
+    if (parts.length === 1) {   // no placeholders yet - fall back to plain + one input
+        wrap.appendChild(document.createTextNode(template + ' '));
+        wrap.appendChild(inputEl('ex-input ex-blank', last[0] || ''));
+    } else {
+        parts.forEach((part, i) => {
+            if (i % 2 === 0) {
+                if (part) wrap.appendChild(document.createTextNode(part));
+            } else {
+                const n = +part;
+                const inp = inputEl('ex-input ex-blank', last[n] || '');
+                inp.dataset.blank = n;
+                wrap.appendChild(inp);
             }
         });
-        // top up if the author declared more blanks than the prompt shows
-        for (let k = segs.length - 1; k < nBlanks; k++) {
-            wrap.appendChild(inputEl('ex-input ex-blank', last[k] || ''));
-        }
-    } else {
-        wrap.appendChild(document.createTextNode(prompt + ' '));
-        for (let k = 0; k < nBlanks; k++) {
-            wrap.appendChild(inputEl('ex-input ex-blank', last[k] || ''));
-        }
     }
     container.appendChild(wrap);
+}
+
+// legacy pre-split "text" items (should be migrated away, kept as a safety net)
+function renderTextBody(container, it) {
+    if ((it.prompt || '').match(/_{2,}/)) return renderFillBody(container, it);
+    return renderTranslateBody(container, it);
 }
 
 function renderSetBody(container, it) {
@@ -237,7 +256,8 @@ function renderOpenBody(container, it) {
 }
 
 const BODY_RENDERERS = {
-    text: renderTextBody, set: renderSetBody, choice: renderChoiceBody, table: renderTableBody,
+    translate: renderTranslateBody, fill: renderFillBody, text: renderTextBody,
+    set: renderSetBody, choice: renderChoiceBody, table: renderTableBody,
 };
 
 function renderItem(it) {
@@ -292,9 +312,12 @@ function renderItem(it) {
 
 function answerHtml(detail) {
     const e = detail.editable || {};
-    if (detail.grader === 'text') {
+    if (detail.grader === 'translate') {
+        return `<div><b>${(e.accept || []).map(escapeHtml).join('</b> or <b>')}</b></div>`;
+    }
+    if (detail.grader === 'fill' || detail.grader === 'text') {
         return (e.blanks || []).map((acc, i) =>
-            `<div>${e.blanks.length > 1 ? `Blank ${i + 1}: ` : ''}<b>${(acc || []).map(escapeHtml).join('</b> or <b>')}</b></div>`
+            `<div>${e.blanks.length > 1 ? `{${i}}: ` : ''}<b>${(acc || []).map(escapeHtml).join('</b> or <b>')}</b></div>`
         ).join('');
     }
     if (detail.grader === 'set') {
@@ -342,7 +365,7 @@ function showRevealPanel(card) {
 function pipeJoin(a) { return (a || []).join('  |  '); }
 function pipeSplit(s) { return (s || '').split('|').map(x => x.trim()).filter(Boolean); }
 
-function graderFieldsInline(grader, e) {
+function graderFieldsInline(grader, e, promptTa) {
     e = e || {};
     const box = document.createElement('div');
     box.className = 'ex-edit-fields';
@@ -362,23 +385,47 @@ function graderFieldsInline(grader, e) {
     };
     let collect;
 
-    if (grader === 'text') {
-        const blanks = (e.blanks && e.blanks.length) ? e.blanks : [[]];
-        const inputs = blanks.map((acc, i) =>
-            row(blanks.length > 1 ? `Blank ${i + 1} accepts` : 'Accepts', tin(pipeJoin(acc))));
-        const addWrap = document.createElement('div');
-        addWrap.className = 'ans-row';
-        addWrap.appendChild(document.createElement('span'));
-        const addBtn = document.createElement('button');
-        addBtn.type = 'button'; addBtn.className = 'secondary tiny'; addBtn.textContent = '+ blank';
-        addBtn.addEventListener('click', () => {
-            const inp = tin('');
-            inputs.push(inp);
-            box.insertBefore(row(`Blank ${inputs.length} accepts`, inp), addWrap);
-        });
-        addWrap.appendChild(addBtn);
-        box.appendChild(addWrap);
-        collect = () => ({blanks: inputs.map(i => pipeSplit(i.value))});
+    if (grader === 'translate') {
+        const accIn = row('Accepted answers', tin(pipeJoin(e.accept)));
+        collect = () => ({accept: pipeSplit(accIn.value)});
+
+    } else if (grader === 'fill') {
+        // one accepts-row per {N} in the sentence, kept in sync with the prompt box
+        const holder = document.createElement('div');
+        box.appendChild(holder);
+        const byNum = {};                       // n -> input, so values survive a rebuild
+        (e.blanks || []).forEach((acc, i) => { byNum[i] = pipeJoin(acc); });
+        const rebuild = () => {
+            const nums = templateNums(promptTa ? promptTa.value : '').sort((a, b) => a - b);
+            holder.innerHTML = '';
+            if (!nums.length) {
+                const p = document.createElement('div');
+                p.className = 'ans-hint';
+                p.textContent = 'Add {0} (and {1}, {2}…) to the sentence above to get blanks.';
+                holder.appendChild(p);
+            }
+            nums.forEach(n => {
+                const l = document.createElement('label');
+                l.className = 'ans-row';
+                const s = document.createElement('span');
+                s.className = 'ans-label'; s.textContent = `{${n}} accepts`;
+                const inp = tin(byNum[n] || '');
+                inp.dataset.num = n;
+                inp.addEventListener('input', () => { byNum[n] = inp.value; });
+                l.append(s, inp);
+                holder.appendChild(l);
+            });
+        };
+        rebuild();
+        if (promptTa) promptTa.addEventListener('input', rebuild);
+        collect = () => {
+            const nums = templateNums(promptTa ? promptTa.value : '').sort((a, b) => a - b);
+            return {
+                template: promptTa ? promptTa.value : '',
+                blanks: nums.map(n => pipeSplit(
+                    (holder.querySelector(`input[data-num="${n}"]`) || {}).value || byNum[n] || '')),
+            };
+        };
 
     } else if (grader === 'set') {
         const ta = document.createElement('textarea');
@@ -464,28 +511,45 @@ async function openInlineEdit(card, it) {
     headIn.value = detail.section || '';
     form.appendChild(mkRow('Heading above', headIn));
 
-    // prompt
+    // prompt / sentence
     const promptTa = document.createElement('textarea');
     promptTa.className = 'ans-edit'; promptTa.rows = 2; promptTa.value = detail.prompt || '';
-    form.appendChild(mkRow('Prompt', promptTa));
+    const promptRow = mkRow('Prompt', promptTa);
+    form.appendChild(promptRow);
     const promptHint = document.createElement('div');
     promptHint.className = 'ans-hint';
-    promptHint.textContent = 'Use ____ where an answer blank should appear (fill-in / table).';
     form.appendChild(promptHint);
 
-    // grader-specific fields
-    let fields = graderFieldsInline(detail.grader, detail.editable);
-    const fieldWrap = document.createElement('div');
-    fieldWrap.appendChild(fields.node);
-    form.appendChild(fieldWrap);
+    const PROMPT_LABEL = {
+        translate: 'Text to translate', fill: 'Sentence (use {0}, {1} …)',
+    };
+    const PROMPT_HINT = {
+        fill: 'Type the sentence and put {0}, {1}, {2}… where each blank goes; an "accepts" box appears for each.',
+        translate: 'The word or sentence the learner should translate.',
+        choice: 'Use ____ to show where the choice goes.',
+        table: '', set: '',
+    };
+    const relabelPrompt = (g) => {
+        promptRow.querySelector('.ans-label').textContent = PROMPT_LABEL[g] || 'Prompt';
+        promptHint.textContent = PROMPT_HINT[g] || '';
+        promptHint.hidden = !(PROMPT_HINT[g]);
+    };
 
-    typeSel.addEventListener('change', () => {
-        // pre-fill the new type's fields from whatever answers we already have
-        const flat = flattenAnswers(detail);
-        const seed = seedForGrader(typeSel.value, flat, detail.editable);
-        fields = graderFieldsInline(typeSel.value, seed);
+    // grader-specific fields
+    const fieldWrap = document.createElement('div');
+    form.appendChild(fieldWrap);
+    let fields;
+    const buildFields = (g, seed) => {
+        fields = graderFieldsInline(g, seed, promptTa);
         fieldWrap.innerHTML = '';
         fieldWrap.appendChild(fields.node);
+        relabelPrompt(g);
+    };
+    buildFields(detail.grader, detail.editable);
+
+    typeSel.addEventListener('change', () => {
+        const flat = flattenAnswers(detail);
+        buildFields(typeSel.value, seedForGrader(typeSel.value, flat, detail.editable));
     });
 
     const err = document.createElement('div');
@@ -535,7 +599,8 @@ function mkRow(labelText, node) {
 
 function flattenAnswers(detail) {
     const e = detail.editable || {};
-    if (detail.grader === 'text') return [].concat(...(e.blanks || []));
+    if (detail.grader === 'translate') return e.accept || [];
+    if (detail.grader === 'fill' || detail.grader === 'text') return [].concat(...(e.blanks || []));
     if (detail.grader === 'set') return e.accept_pool || [];
     if (detail.grader === 'choice') return e.correct || [];
     if (detail.grader === 'table') return [].concat(...((e.rows || []).map(r => r.accept || [])));
@@ -543,6 +608,8 @@ function flattenAnswers(detail) {
 }
 
 function seedForGrader(grader, flat, origEditable) {
+    if (grader === 'translate') return {accept: flat};
+    if (grader === 'fill') return {blanks: (origEditable && origEditable.blanks) || [flat.length ? flat : ['']]};
     if (grader === 'text') return {blanks: [flat.length ? flat : ['']]};
     if (grader === 'set') return {accept_pool: flat, n_required: Math.min(3, flat.length) || 1};
     if (grader === 'choice') return {options: (origEditable && origEditable.options) || flat, correct: flat.slice(0, 1)};
@@ -640,6 +707,14 @@ function collectAnswers() {
         } else if (it.grader === 'choice') {
             const sel = card.querySelector('input[type="radio"]:checked');
             out[id] = sel ? sel.value : '';
+        } else if (it.grader === 'fill') {
+            // align answers to {0},{1},... by the data-blank tag, not DOM order
+            const arr = [];
+            card.querySelectorAll('input.ex-input[data-blank]').forEach(i => {
+                arr[+i.dataset.blank] = i.value;
+            });
+            for (let k = 0; k < arr.length; k++) if (arr[k] === undefined) arr[k] = '';
+            out[id] = arr;
         } else {
             out[id] = Array.from(card.querySelectorAll('input.ex-input')).map(i => i.value);
         }
@@ -787,9 +862,11 @@ function answerEditor(it) {
         return i;
     };
 
-    if (it.grader === 'text') {
+    if (it.grader === 'translate') {
+        field('Accepts', textInput((e.accept || []).join('  |  ')));
+    } else if (it.grader === 'fill' || it.grader === 'text') {
         (e.blanks || []).forEach((acc, idx) => {
-            field((e.blanks.length > 1 ? `Blank ${idx + 1} accepts` : 'Accepts'),
+            field((e.blanks.length > 1 ? `{${idx}} accepts` : 'Accepts'),
                   textInput((acc || []).join('  |  ')));
         });
     } else if (it.grader === 'table') {
@@ -826,11 +903,11 @@ function collectAnswerEdits() {
     const out = {};
     document.querySelectorAll('.ans-card').forEach(card => {
         const id = card.dataset.id, grader = card.dataset.grader;
-        const inputs = [...card.querySelectorAll('input.ans-edit, textarea.ans-edit')];
-        if (grader === 'text') {
-            out[id] = {blanks: card.querySelectorAll('.ans-row input.ans-edit').length
-                ? [...card.querySelectorAll('.ans-row input.ans-edit')].map(i => splitAlts(i.value))
-                : []};
+        if (grader === 'translate') {
+            const ci = card.querySelector('.ans-row input.ans-edit');
+            out[id] = {accept: splitAlts(ci ? ci.value : '')};
+        } else if (grader === 'fill' || grader === 'text') {
+            out[id] = {blanks: [...card.querySelectorAll('.ans-row input.ans-edit')].map(i => splitAlts(i.value))};
         } else if (grader === 'table') {
             out[id] = {rows: [...card.querySelectorAll('.ans-row input.ans-edit')].map(i => splitAlts(i.value))};
         } else if (grader === 'choice') {

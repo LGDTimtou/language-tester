@@ -415,8 +415,11 @@ def api_reset_progress(lesson_id):
 
 def _render_spec(grader, spec):
     """Client-facing render hints - deliberately strips every accepted answer."""
-    if grader == "text":
-        return {"n_blanks": len(spec.get("blanks", [])) or 1}
+    if grader == "translate":
+        return {}
+    if grader in ("fill", "text"):
+        return {"n_blanks": len(spec.get("blanks", [])) or 1,
+                "template": spec.get("template", "")}
     if grader == "set":
         return {"n_required": spec.get("n_required", 1)}
     if grader == "choice":
@@ -564,8 +567,11 @@ def api_exercises_reset(lesson_id):
 
 def _answer_editable(grader, spec):
     """The bits of a graded item's spec the user is allowed to correct."""
-    if grader == "text":
-        return {"blanks": [list(b.get("accept", [])) for b in spec.get("blanks", [])]}
+    if grader == "translate":
+        return {"accept": list(spec.get("accept", []))}
+    if grader in ("fill", "text"):
+        return {"template": spec.get("template", ""),
+                "blanks": [list(b.get("accept", [])) for b in spec.get("blanks", [])]}
     if grader == "set":
         return {"accept_pool": list(spec.get("accept_pool", [])),
                 "n_required": spec.get("n_required", 1)}
@@ -587,7 +593,13 @@ def _clean_list(v):
 def _apply_answer_edit(grader, spec, edit):
     """Return a new spec with the user's corrections merged in (empty edits ignored)."""
     spec = json.loads(json.dumps(spec))  # deep copy
-    if grader == "text":
+    if grader == "translate":
+        acc = _clean_list(edit.get("accept", []))
+        if acc:
+            spec["accept"] = acc
+    elif grader in ("fill", "text"):
+        if edit.get("template"):
+            spec["template"] = edit["template"]
         for i, acc in enumerate(edit.get("blanks", [])):
             acc = _clean_list(acc)
             if acc and i < len(spec.get("blanks", [])):
@@ -616,10 +628,18 @@ def _apply_answer_edit(grader, spec, edit):
 def _spec_from_form(grader, form):
     """Build a fresh grader spec from the inline / bulk editor's fields."""
     form = form or {}
-    if grader == "text":
-        blanks = [_clean_list(b) for b in form.get("blanks", [])]
-        blanks = [b for b in blanks if b] or [[""]]
-        return {"blanks": [{"accept": b} for b in blanks]}
+    if grader == "translate":
+        return {"accept": _clean_list(form.get("accept", []))}
+    if grader in ("fill", "text"):
+        template = (form.get("template") or "").strip()
+        nums = sorted({int(m) for m in re.findall(r"\{(\d+)\}", template)})
+        for new_i, old in enumerate(nums):          # renumber to {0}..{k-1}
+            template = template.replace("{%d}" % old, "\x00%d\x00" % new_i)
+        template = re.sub(r"\x00(\d+)\x00", r"{\1}", template)
+        blanks_in = form.get("blanks", [])
+        blanks = [{"accept": _clean_list(blanks_in[j]) if j < len(blanks_in) else []}
+                  for j in range(len(nums))] or [{"accept": []}]
+        return {"template": template, "blanks": blanks}
     if grader == "set":
         pool = _clean_list(form.get("accept_pool", []))
         try:
@@ -645,7 +665,12 @@ def _spec_from_form(grader, form):
 
 def _spec_problem(grader, spec):
     """Human-readable reason the spec is unusable, or None."""
-    if grader == "text":
+    if grader == "translate":
+        if not spec.get("accept"):
+            return "add at least one accepted answer"
+    elif grader in ("fill", "text"):
+        if "{0}" not in spec.get("template", "") and "{1}" not in spec.get("template", ""):
+            return "put a blank in the sentence with {0} (and {1}, {2}, … for more)"
         if not spec["blanks"] or any(not b["accept"] for b in spec["blanks"]):
             return "every blank needs at least one accepted answer"
     elif grader == "set":
@@ -760,6 +785,9 @@ def api_exercise_patch(item_id):
             spec = _spec_from_form(grader, body.get("form", {}))
         else:
             spec = json.loads(r["spec_json"] or "{}")
+        # a fill item's sentence IS its prompt - keep the two in sync
+        if grader in ("fill", "text") and spec.get("template"):
+            prompt = spec["template"]
         problem = _spec_problem(grader, spec)
         if problem:
             return jsonify({"error": problem}), 400
