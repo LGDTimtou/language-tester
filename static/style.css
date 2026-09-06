@@ -327,9 +327,15 @@ input[type="checkbox"] { width: 17px; height: 17px; cursor: pointer; }
     margin-left: 8px;
     padding: 4px 7px;
 }
+.io-btn.active {
+    border-color: var(--brand);
+    background: #eef3fe;
+    color: var(--brand-dark);
+}
 .io-btn.listening {
     border-color: var(--bad);
     color: var(--bad);
+    background: #fdeeee;
     animation: io-pulse 1s ease-in-out infinite;
 }
 @keyframes io-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }

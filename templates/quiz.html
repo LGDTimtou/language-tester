@@ -44,7 +44,10 @@ let direction = localStorage.getItem('quizDirection') || 'sv'; // 'sv' = type Sw
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 let answerViaVoice = false;      // this attempt's answer came from the mic
 let voiceAlternatives = [];      // the recogniser's guesses, sent for lenient matching
-let recognizing = false;
+let voiceMode = localStorage.getItem('quizVoiceMode') === '1';  // hands-free: keep listening
+let rec = null;                  // the live SpeechRecognition, or null
+let suppressVoiceThisWord = false;  // set when the user starts typing instead
+let micErrStreak = 0;           // consecutive fatal mic errors -> give up
 
 function updateDirectionLabel() {
     document.getElementById('direction-label').textContent =
@@ -136,8 +139,12 @@ function renderQuizArea() {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); onSubmitOrNext(); }
     });
-    // any manual typing means this is no longer a voice answer -> strict grading
-    input.addEventListener('input', () => { answerViaVoice = false; voiceAlternatives = []; });
+    // manual typing: strict grading, and stop the mic fighting the keyboard
+    input.addEventListener('input', () => {
+        answerViaVoice = false;
+        voiceAlternatives = [];
+        if (rec || voiceMode) { suppressVoiceThisWord = true; stopRecognition(); }
+    });
     setupTts();
     setupMic();
     input.focus();
@@ -183,54 +190,103 @@ function micNote(text, bad) {
     fb.textContent = text;
     fb.className = 'quiz-feedback' + (bad ? ' incorrect' : '');
 }
+function reflectMicBtn() {
+    const btn = document.getElementById('mic-btn');
+    if (!btn) return;
+    btn.classList.toggle('active', voiceMode);
+    btn.classList.toggle('listening', !!rec);
+    btn.title = voiceMode ? 'Voice mode ON — click to stop' : 'Voice mode — click to start hands-free answering';
+}
+
+function stopRecognition() {
+    const r = rec;
+    rec = null;
+    if (r) { r.onresult = r.onerror = r.onend = null; try { r.abort(); } catch (e) {} }
+    const inp = document.getElementById('answer-input');
+    if (inp && inp.placeholder === 'Listening…') inp.placeholder = 'Type your answer';
+    reflectMicBtn();
+}
+
+function startRecognition() {
+    if (rec || !SpeechRec || !voiceMode || answered || suppressVoiceThisWord) return;
+    rec = new SpeechRec();
+    rec.lang = direction === 'sv' ? 'sv-SE' : 'en-US';   // language of the ANSWER
+    rec.maxAlternatives = 6;
+    rec.interimResults = false;
+    const input = document.getElementById('answer-input');
+    if (input) input.placeholder = 'Listening…';
+
+    rec.onresult = async (e) => {
+        const alts = [...e.results[e.results.length - 1]]
+            .map(r => (r.transcript || '').trim()).filter(Boolean);
+        if (!alts.length) return;
+        micErrStreak = 0;
+        const box = document.getElementById('answer-input');
+        if (box) box.value = alts[0];                     // programmatic set: no 'input' event
+        answerViaVoice = true;
+        voiceAlternatives = alts;
+        micNote('');
+        let matched = false;
+        try {
+            const m = await fetch(`/api/lessons/${lessonId}/quiz-match`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({word_id: current.id, transcript: alts[0],
+                                      alternatives: alts, direction}),
+            }).then(r => r.json());
+            matched = !!m.match;
+        } catch (err) { matched = false; }
+        if (matched && !answered) {
+            stopRecognition();
+            onSubmitOrNext();                             // auto-Check -> advances -> re-arms
+        } else if (!answered) {
+            micNote(`🎤 heard “${alts[0]}” — say it again, or type it`, false);
+            // rec.onend fires next and auto-restarts (still in voice mode)
+        }
+    };
+    rec.onerror = (e) => {
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        micErrStreak++;
+        const msg = MIC_ERRORS[e.error] !== undefined ? MIC_ERRORS[e.error]
+                                                      : ('speech recognition error: ' + e.error);
+        if (msg) micNote('🎤 ' + msg, true);
+        if (micErrStreak >= 2) {                          // stuck (usually: no speech backend)
+            voiceMode = false;
+            localStorage.setItem('quizVoiceMode', '');
+        }
+    };
+    rec.onend = () => {
+        rec = null;
+        reflectMicBtn();
+        if (voiceMode && !answered && !suppressVoiceThisWord) {
+            setTimeout(startRecognition, 300);           // keep the mic alive between utterances
+        } else {
+            const inp = document.getElementById('answer-input');
+            if (inp && inp.placeholder === 'Listening…') inp.placeholder = 'Type your answer';
+        }
+    };
+    try {
+        rec.start();
+        reflectMicBtn();
+    } catch (err) {
+        rec = null;
+        micNote('🎤 could not start the microphone: ' + err.message, true);
+    }
+}
+
 function setupMic() {
     const btn = document.getElementById('mic-btn');
     if (!btn || !SpeechRec) return;                 // Firefox / older Safari: stays typing-only
     btn.hidden = false;
     btn.onclick = () => {
-        if (recognizing || answered) return;
-        const rec = new SpeechRec();
-        rec.lang = direction === 'sv' ? 'sv-SE' : 'en-US';   // language of the ANSWER
-        rec.maxAlternatives = 6;
-        rec.interimResults = false;
-        recognizing = true;
-        let sawError = false, gotResult = false;
-        btn.classList.add('listening');
-        const input = document.getElementById('answer-input');
-        input.placeholder = 'Listening…';
+        voiceMode = !voiceMode;
+        localStorage.setItem('quizVoiceMode', voiceMode ? '1' : '');
+        micErrStreak = 0;
         micNote('');
-        rec.onresult = (e) => {
-            gotResult = true;
-            const alts = [...e.results[0]].map(r => (r.transcript || '').trim()).filter(Boolean);
-            if (alts.length) {
-                input.value = alts[0];               // programmatic set -> no 'input' event
-                answerViaVoice = true;
-                voiceAlternatives = alts;
-                micNote('');
-            }
-        };
-        rec.onerror = (e) => {
-            sawError = true;
-            const msg = MIC_ERRORS[e.error] !== undefined ? MIC_ERRORS[e.error]
-                                                          : ('Speech recognition error: ' + e.error);
-            if (msg) micNote('🎤 ' + msg, true);
-        };
-        rec.onend = () => {
-            recognizing = false;
-            btn.classList.remove('listening');
-            input.placeholder = 'Type your answer';
-            if (!gotResult && !sawError) micNote('🎤 Didn’t catch that — try again.', true);
-            if (!recognizing) input.focus();
-        };
-        try {
-            rec.start();
-        } catch (err) {
-            recognizing = false;
-            btn.classList.remove('listening');
-            input.placeholder = 'Type your answer';
-            micNote('🎤 Could not start the microphone: ' + err.message, true);
-        }
+        if (voiceMode) startRecognition(); else stopRecognition();
+        reflectMicBtn();
     };
+    reflectMicBtn();
+    if (voiceMode) startRecognition();              // re-arm for this freshly rendered word
 }
 
 let advancing = false;
@@ -304,6 +360,7 @@ function onRetryTypo() {
     answered = false;
     answerViaVoice = false;
     voiceAlternatives = [];
+    suppressVoiceThisWord = false;
 
     const input = document.getElementById('answer-input');
     input.value = '';
@@ -316,6 +373,7 @@ function onRetryTypo() {
     fb.className = 'quiz-feedback';
 
     document.getElementById('submit-btn').textContent = 'Check';
+    if (voiceMode) startRecognition();
     document.getElementById('typo-btn').remove();
 }
 
@@ -325,6 +383,8 @@ async function loadNext() {
     advancing = false;
     answerViaVoice = false;
     voiceAlternatives = [];
+    suppressVoiceThisWord = false;
+    stopRecognition();   // renderQuizArea() -> setupMic() re-arms it for the new word
     const res = await fetch(`/api/lessons/${lessonId}/quiz-next?mode=${quizMode}`);
     const data = await res.json();
     current = data.word;

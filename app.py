@@ -308,6 +308,26 @@ def api_quiz_typo_retry(lesson_id):
                     "lenient": lenient, "heard": heard})
 
 
+@app.route("/api/lessons/<int:lesson_id>/quiz-match", methods=["POST"])
+def api_quiz_match(lesson_id):
+    """Read-only: does a spoken answer match the current word? Used by hands-free
+    voice mode to decide whether to auto-submit. Records nothing."""
+    db = get_db()
+    body = request.get_json(force=True)
+    current = db.execute(
+        "SELECT swedish, english FROM words WHERE id = ? AND lesson_id = ?",
+        (body.get("word_id"), lesson_id),
+    ).fetchone()
+    if not current:
+        abort(404)
+    expected = current["swedish"] if body.get("direction", "sv") == "sv" else current["english"]
+    heard = [body.get("transcript", "")] + [a for a in (body.get("alternatives") or []) if a]
+    if any(normalize_answer(h) == normalize_answer(expected) for h in heard):
+        return jsonify({"match": True, "heard": None})
+    ok, _score, best = close_enough(expected, heard)
+    return jsonify({"match": ok, "heard": best if ok else None})
+
+
 def _session_counts(db, lesson_id):
     row = db.execute("""
         SELECT SUM(session_state = 'pending') AS pending, SUM(session_state = 'done') AS done
