@@ -7,6 +7,7 @@ import unicodedata
 from flask import Flask, g, jsonify, render_template, request, abort
 
 from grading import grade_item
+from voicematch import close_enough
 from parse_exercises import (
     DATA_DIR, dump_lesson_json, ensure_exercises, init_exercises_db, item_key,
     resolve_db_path,
@@ -229,12 +230,27 @@ def api_set_known(word_id):
     return jsonify({"ok": True})
 
 
+def _judge_answer(body, expected):
+    """Typed answers are strict. Spoken answers (voice=true, with the
+    recogniser's alternatives) also pass if anything it heard sounds close
+    enough to `expected`. Returns (correct, lenient, heard_transcript)."""
+    given = body.get("answer", "")
+    heard = [given] + [a for a in (body.get("alternatives") or []) if a]
+    exp_norm = normalize_answer(expected)
+    if any(normalize_answer(h) == exp_norm for h in heard):
+        return True, False, None
+    if body.get("voice") and expected:
+        ok, _score, best = close_enough(expected, heard)
+        if ok:
+            return True, True, best
+    return False, False, None
+
+
 @app.route("/api/lessons/<int:lesson_id>/quiz-check", methods=["POST"])
 def api_quiz_check(lesson_id):
     db = get_db()
     body = request.get_json(force=True)
     word_id = body.get("word_id")
-    given = body.get("answer", "")
     direction = body.get("direction", "sv")
 
     current = db.execute(
@@ -244,7 +260,7 @@ def api_quiz_check(lesson_id):
         abort(404)
 
     expected = current["swedish"] if direction == "sv" else current["english"]
-    correct = normalize_answer(given) == normalize_answer(expected)
+    correct, lenient, heard = _judge_answer(body, expected)
 
     if correct:
         db.execute("UPDATE words SET correct_count = correct_count + 1 WHERE id = ?", (word_id,))
@@ -253,7 +269,8 @@ def api_quiz_check(lesson_id):
         db.execute("UPDATE words SET wrong_count = wrong_count + 1, round_missed = 1 WHERE id = ?", (word_id,))
     db.commit()
 
-    return jsonify({"correct": correct, "correct_answer": expected})
+    return jsonify({"correct": correct, "correct_answer": expected,
+                    "lenient": lenient, "heard": heard})
 
 
 @app.route("/api/lessons/<int:lesson_id>/quiz-typo-retry", methods=["POST"])
@@ -265,7 +282,6 @@ def api_quiz_typo_retry(lesson_id):
     db = get_db()
     body = request.get_json(force=True)
     word_id = body.get("word_id")
-    given = body.get("answer", "")
     direction = body.get("direction", "sv")
 
     current = db.execute(
@@ -275,7 +291,7 @@ def api_quiz_typo_retry(lesson_id):
         abort(404)
 
     expected = current["swedish"] if direction == "sv" else current["english"]
-    correct = normalize_answer(given) == normalize_answer(expected)
+    correct, lenient, heard = _judge_answer(body, expected)
 
     if correct:
         db.execute(
@@ -288,7 +304,8 @@ def api_quiz_typo_retry(lesson_id):
     # if still wrong, the original wrong_count/round_missed already recorded
     # from the first attempt stand as-is - nothing further to change
 
-    return jsonify({"correct": correct, "correct_answer": expected})
+    return jsonify({"correct": correct, "correct_answer": expected,
+                    "lenient": lenient, "heard": heard})
 
 
 def _session_counts(db, lesson_id):

@@ -40,6 +40,12 @@ let sessionAnswered = 0;
 let sessionCorrect = 0;
 let direction = localStorage.getItem('quizDirection') || 'sv'; // 'sv' = type Swedish, 'en' = type English
 
+// --- speech ---
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let answerViaVoice = false;      // this attempt's answer came from the mic
+let voiceAlternatives = [];      // the recogniser's guesses, sent for lenient matching
+let recognizing = false;
+
 function updateDirectionLabel() {
     document.getElementById('direction-label').textContent =
         direction === 'sv' ? 'See English → type Swedish' : 'See Swedish → type English';
@@ -106,9 +112,15 @@ function renderQuizArea() {
     area.innerHTML = `
         <div class="quiz-card">
             ${progressBarHtml()}
-            <div class="quiz-prompt">${promptText(current)}</div>
+            <div class="quiz-prompt">
+                ${promptText(current)}
+                <button id="tts-btn" class="io-btn" title="Hear it in Swedish" aria-label="Hear it in Swedish" hidden>🔊</button>
+            </div>
             <div class="quiz-context">${tenseBadge}</div>
-            <input type="text" id="answer-input" class="quiz-input" autocomplete="off" placeholder="Type your answer">
+            <div class="answer-row">
+                <input type="text" id="answer-input" class="quiz-input" autocomplete="off" placeholder="Type your answer">
+                <button id="mic-btn" class="io-btn" title="Speak your answer" aria-label="Speak your answer" hidden>🎤</button>
+            </div>
             <div class="quiz-feedback" id="feedback"></div>
             <div class="quiz-buttons">
                 <button id="submit-btn">Check</button>
@@ -124,7 +136,70 @@ function renderQuizArea() {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); onSubmitOrNext(); }
     });
+    // any manual typing means this is no longer a voice answer -> strict grading
+    input.addEventListener('input', () => { answerViaVoice = false; voiceAlternatives = []; });
+    setupTts();
+    setupMic();
     input.focus();
+}
+
+// ---------- text-to-speech: hear the Swedish word ----------
+function swedishVoice() {
+    const vs = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+    return vs.find(v => /sv(-|_)?se/i.test(v.lang) || /sv/i.test(v.lang));
+}
+function setupTts() {
+    const btn = document.getElementById('tts-btn');
+    if (!btn || !window.speechSynthesis) return;
+    // don't give the Swedish answer away before it's been attempted
+    const wouldSpoil = direction === 'sv' && !answered;
+    btn.hidden = false;
+    btn.disabled = wouldSpoil;
+    btn.title = wouldSpoil ? 'Available after you answer' : 'Hear it in Swedish';
+    btn.onclick = () => {
+        const u = new SpeechSynthesisUtterance(current.swedish);
+        u.lang = 'sv-SE';
+        const v = swedishVoice();
+        if (v) u.voice = v;
+        speechSynthesis.cancel();
+        speechSynthesis.speak(u);
+    };
+}
+// voice list can load async in some browsers
+if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => { if (current) setupTts(); };
+
+// ---------- speech-to-text: say your answer ----------
+function setupMic() {
+    const btn = document.getElementById('mic-btn');
+    if (!btn || !SpeechRec) return;                 // Firefox / older Safari: stays typing-only
+    btn.hidden = false;
+    btn.onclick = () => {
+        if (recognizing || answered) return;
+        const rec = new SpeechRec();
+        rec.lang = direction === 'sv' ? 'sv-SE' : 'en-US';   // language of the ANSWER
+        rec.maxAlternatives = 6;
+        rec.interimResults = false;
+        recognizing = true;
+        btn.classList.add('listening');
+        const input = document.getElementById('answer-input');
+        input.placeholder = 'Listening…';
+        rec.onresult = (e) => {
+            const alts = [...e.results[0]].map(r => (r.transcript || '').trim()).filter(Boolean);
+            if (alts.length) {
+                input.value = alts[0];               // programmatic set -> no 'input' event
+                answerViaVoice = true;
+                voiceAlternatives = alts;
+            }
+        };
+        rec.onerror = () => {};
+        rec.onend = () => {
+            recognizing = false;
+            btn.classList.remove('listening');
+            input.placeholder = 'Type your answer';
+            input.focus();
+        };
+        rec.start();
+    };
 }
 
 let advancing = false;
@@ -143,7 +218,10 @@ async function onSubmitOrNext() {
         const res = await fetch(endpoint, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({word_id: current.id, answer: given, direction})
+            body: JSON.stringify({
+                word_id: current.id, answer: given, direction,
+                voice: answerViaVoice, alternatives: voiceAlternatives,
+            })
         });
         const result = await res.json();
         const correct = result.correct;
@@ -156,12 +234,15 @@ async function onSubmitOrNext() {
         const fb = document.getElementById('feedback');
         fb.className = 'quiz-feedback ' + (correct ? 'correct' : 'incorrect');
         if (correct) {
-            fb.textContent = retrying ? 'Correct! Counted as correct on the first try.' : 'Correct!';
+            let base = retrying ? 'Correct! Counted as correct on the first try.' : 'Correct!';
+            if (result.lenient) base += ` (heard “${result.heard}” — close enough)`;
+            fb.textContent = base;
         } else {
             fb.textContent = retrying
                 ? `Still incorrect — answer: ${result.correct_answer}`
                 : `Incorrect — answer: ${result.correct_answer}`;
         }
+        setupTts();   // the Swedish word is safe to hear now
         document.getElementById('submit-btn').textContent = 'Next';
         document.getElementById('stat-answered').textContent = sessionAnswered;
         document.getElementById('stat-correct').textContent = sessionCorrect;
@@ -190,6 +271,8 @@ async function onSubmitOrNext() {
 function onRetryTypo() {
     retrying = true;
     answered = false;
+    answerViaVoice = false;
+    voiceAlternatives = [];
 
     const input = document.getElementById('answer-input');
     input.value = '';
@@ -209,6 +292,8 @@ async function loadNext() {
     answered = false;
     retrying = false;
     advancing = false;
+    answerViaVoice = false;
+    voiceAlternatives = [];
     const res = await fetch(`/api/lessons/${lessonId}/quiz-next?mode=${quizMode}`);
     const data = await res.json();
     current = data.word;
