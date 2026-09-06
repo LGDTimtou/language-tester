@@ -169,6 +169,20 @@ function setupTts() {
 if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => { if (current) setupTts(); };
 
 // ---------- speech-to-text: say your answer ----------
+const MIC_ERRORS = {
+    'not-allowed': 'Microphone blocked — allow mic access for this site in the address bar.',
+    'service-not-allowed': 'This browser has no speech-recognition service. It works in Google Chrome; Chromium / Brave / Firefox on Linux usually don’t ship one.',
+    'network': 'Speech service unreachable — it needs internet, and some Chromium builds have no speech backend at all.',
+    'audio-capture': 'No microphone found.',
+    'no-speech': 'Didn’t catch anything — try again and speak right after clicking.',
+    'aborted': '',
+};
+function micNote(text, bad) {
+    const fb = document.getElementById('feedback');
+    if (!fb) return;
+    fb.textContent = text;
+    fb.className = 'quiz-feedback' + (bad ? ' incorrect' : '');
+}
 function setupMic() {
     const btn = document.getElementById('mic-btn');
     if (!btn || !SpeechRec) return;                 // Firefox / older Safari: stays typing-only
@@ -180,25 +194,42 @@ function setupMic() {
         rec.maxAlternatives = 6;
         rec.interimResults = false;
         recognizing = true;
+        let sawError = false, gotResult = false;
         btn.classList.add('listening');
         const input = document.getElementById('answer-input');
         input.placeholder = 'Listening…';
+        micNote('');
         rec.onresult = (e) => {
+            gotResult = true;
             const alts = [...e.results[0]].map(r => (r.transcript || '').trim()).filter(Boolean);
             if (alts.length) {
                 input.value = alts[0];               // programmatic set -> no 'input' event
                 answerViaVoice = true;
                 voiceAlternatives = alts;
+                micNote('');
             }
         };
-        rec.onerror = () => {};
+        rec.onerror = (e) => {
+            sawError = true;
+            const msg = MIC_ERRORS[e.error] !== undefined ? MIC_ERRORS[e.error]
+                                                          : ('Speech recognition error: ' + e.error);
+            if (msg) micNote('🎤 ' + msg, true);
+        };
         rec.onend = () => {
             recognizing = false;
             btn.classList.remove('listening');
             input.placeholder = 'Type your answer';
-            input.focus();
+            if (!gotResult && !sawError) micNote('🎤 Didn’t catch that — try again.', true);
+            if (!recognizing) input.focus();
         };
-        rec.start();
+        try {
+            rec.start();
+        } catch (err) {
+            recognizing = false;
+            btn.classList.remove('listening');
+            input.placeholder = 'Type your answer';
+            micNote('🎤 Could not start the microphone: ' + err.message, true);
+        }
     };
 }
 
